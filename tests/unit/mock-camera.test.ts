@@ -1,5 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, it, expect, afterEach } from 'vitest';
 import { MockCameraDriver } from '../../src/server/camera/mock-camera.js';
+import { resolveSdkLibraryPath } from '../../src/server/camera/koffi-bindings.js';
+
+const originalSdkEnv = process.env.ASTROSCOPE_ASI_SDK_PATH;
+
+afterEach(() => {
+  if (originalSdkEnv === undefined) {
+    delete process.env.ASTROSCOPE_ASI_SDK_PATH;
+  } else {
+    process.env.ASTROSCOPE_ASI_SDK_PATH = originalSdkEnv;
+  }
+});
 
 describe('MockCameraDriver Physics & ZWO SDK Emulation (UT-03)', () => {
   it('models the IMX678 HCG read-noise drop at Gain 182', () => {
@@ -30,5 +43,19 @@ describe('MockCameraDriver Physics & ZWO SDK Emulation (UT-03)', () => {
     const valid = await cam.setROI({ x: 100, y: 100, width: 640, height: 480, bin: 1 });
     expect(valid.width).toBe(640);
     expect(valid.height).toBe(480);
+  });
+
+  it('prefers an explicit ASI SDK path over the project-local bin folder', () => {
+    const sdkDir = path.join(process.cwd(), 'tmp-asi-sdk');
+    const dllName = process.platform === 'win32' ? 'ASICamera2.dll' : process.platform === 'darwin' ? 'libASICamera2.dylib' : 'libASICamera2.so';
+    const fullPath = path.join(sdkDir, dllName);
+
+    fs.mkdirSync(sdkDir, { recursive: true });
+    fs.writeFileSync(fullPath, 'fake-library');
+    process.env.ASTROSCOPE_ASI_SDK_PATH = sdkDir;
+
+    expect(resolveSdkLibraryPath()).toBe(fullPath);
+
+    fs.rmSync(sdkDir, { recursive: true, force: true });
   });
 });

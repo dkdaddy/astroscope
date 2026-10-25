@@ -4,6 +4,7 @@ import {
   computeLaplacianScore
 } from '../../src/client/components/FocusAnalyzer.js';
 import { MockCameraDriver } from '../../src/server/camera/mock-camera.js';
+import { computeBayerRoiFocusScore } from '../../src/server/camera/camera-worker.js';
 
 describe('FocusAnalyzer & Bayer Laplacian Score (UT-02)', () => {
   it('returns 0.0 for a uniform flat Bayer RGGB image (no false CFA checkerboard score)', () => {
@@ -63,5 +64,42 @@ describe('FocusAnalyzer & Bayer Laplacian Score (UT-02)', () => {
       }
     }
     expect(computeLaplacianScore(img, w, h)).toBeGreaterThan(500);
+  });
+});
+
+describe('Worker ROI focus score (real-camera path)', () => {
+  const focusRoi = { x: 760, y: 340, width: 400, height: 400 };
+
+  const makeCam = async (exposureUs: number) => {
+    const cam = new MockCameraDriver();
+    await cam.initialize();
+    await cam.setGain(182);
+    await cam.setExposure(exposureUs);
+    await cam.setROI({ x: 960, y: 540, width: 1920, height: 1080, bin: 1 });
+    cam.setMockParams({ scene: 'MOON', seeingArcsec: 1.0, vibrationShake: false });
+    return cam;
+  };
+
+  const scoreAt = (cam: MockCameraDriver, focuserPosition: number) => {
+    cam.setMockParams({ focuserPosition });
+    return computeBayerRoiFocusScore(cam.generateFrameBuffer(1000), 1920, 1080, focusRoi);
+  };
+
+  it('does not change with scene brightness (exposure +40%) at a fixed focus', async () => {
+    const normal = scoreAt(await makeCam(15_000), 470);
+    const brighter = scoreAt(await makeCam(21_000), 470);
+    expect(brighter / normal).toBeGreaterThan(0.85);
+    expect(brighter / normal).toBeLessThan(1.15);
+  });
+
+  it('peaks at best focus with a low out-of-focus floor', async () => {
+    const cam = await makeCam(15_000);
+    const far = scoreAt(cam, 380);
+    const near = scoreAt(cam, 485);
+    const best = scoreAt(cam, 500);
+    expect(best).toBeGreaterThan(near);
+    expect(near).toBeGreaterThan(far);
+    expect(far / best).toBeLessThan(0.2);
+    expect(best).toBeGreaterThan(5);
   });
 });

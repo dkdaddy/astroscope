@@ -1,5 +1,14 @@
 import type { FocusROI } from '../../common/protocol.js';
 
+/** Display levels on 8-bit data: values <= black map to 0, >= white to 255, gamma > 1 lifts midtones. */
+export interface StretchParams {
+  black: number;
+  white: number;
+  gamma: number;
+}
+
+export const DEFAULT_STRETCH: StretchParams = { black: 0, white: 189, gamma: 1 };
+
 export class Viewport {
   private mainCtx: CanvasRenderingContext2D;
   private pipCtx: CanvasRenderingContext2D;
@@ -9,7 +18,9 @@ export class Viewport {
   private sensorWidth = 1920;
   private sensorHeight = 1080;
   private focusRoi: FocusROI = { x: 760, y: 340, width: 400, height: 400 };
-  private stretchGain = 1.35;
+  private stretch: StretchParams = { ...DEFAULT_STRETCH };
+  private lut = new Uint8Array(256);
+  private lastMainRaw: Uint8Array | null = null;
   private showReticle = true;
 
   private isDragging = false;
@@ -25,11 +36,57 @@ export class Viewport {
     this.mainCtx = mCtx;
     this.pipCtx = pCtx;
 
+    this.rebuildLut();
     this.bindPointerEvents();
   }
 
-  setStretchGain(stretch: number): void {
-    this.stretchGain = stretch;
+  setStretch(params: StretchParams): void {
+    this.stretch = { ...params };
+    this.rebuildLut();
+  }
+
+  private rebuildLut(): void {
+    const black = Math.max(0, Math.min(254, this.stretch.black));
+    const white = Math.max(black + 1, Math.min(255, this.stretch.white));
+    const invGamma = 1 / Math.max(0.1, this.stretch.gamma);
+    for (let v = 0; v < 256; v++) {
+      const t = Math.min(1, Math.max(0, (v - black) / (white - black)));
+      this.lut[v] = Math.round(255 * Math.pow(t, invGamma));
+    }
+  }
+
+  /**
+   * Picks black/white points from the latest viewport frame histogram
+   * (0.5% darkest pixels clipped to black, 0.1% brightest to white). Keeps the current gamma.
+   */
+  computeAutoStretch(): StretchParams | null {
+    const raw = this.lastMainRaw;
+    if (!raw || raw.length === 0) return null;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < raw.length; i++) hist[raw[i]]++;
+
+    const lowTarget = raw.length * 0.005;
+    const highTarget = raw.length * 0.999;
+    let black = 0;
+    let white = 255;
+    let acc = 0;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v];
+      if (acc >= lowTarget) {
+        black = v;
+        break;
+      }
+    }
+    acc = 0;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v];
+      if (acc >= highTarget) {
+        white = v;
+        break;
+      }
+    }
+    if (white - black < 8) white = Math.min(255, black + 8);
+    return { black, white, gamma: this.stretch.gamma };
   }
 
   setSensorDimensions(width: number, height: number, focusRoi: FocusROI): void {
@@ -80,7 +137,7 @@ export class Viewport {
     imgData: ImageData
   ): void {
     const dst = imgData.data;
-    const gain = this.stretchGain;
+    const lut = this.lut;
 
     for (let y = 0; y < height; y++) {
       const yPrev = y > 0 ? y - 1 : y + 1;
@@ -127,9 +184,9 @@ export class Viewport {
         }
 
         const outOffset = idx << 2;
-        dst[outOffset] = Math.min(255, r * gain);
-        dst[outOffset + 1] = Math.min(255, g * gain);
-        dst[outOffset + 2] = Math.min(255, b * gain);
+        dst[outOffset] = lut[r];
+        dst[outOffset + 1] = lut[g];
+        dst[outOffset + 2] = lut[b];
         dst[outOffset + 3] = 255;
       }
     }
@@ -142,6 +199,7 @@ export class Viewport {
       this.mainImgData = this.mainCtx.createImageData(width, height);
     }
 
+    this.lastMainRaw = raw;
     this.debayerRggbToImageData(raw, width, height, this.mainImgData);
     this.mainCtx.putImageData(this.mainImgData, 0, 0);
 
@@ -170,6 +228,27 @@ export class Viewport {
       );
       this.mainCtx.restore();
     }
+  }
+
+  /**
+   * Debayers a full-resolution RAW8 frame (with the current display stretch) and encodes it as JPEG.
+   */
+  exportJpeg(raw: Uint8Array, width: number, height: number): Promise<Blob> {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return Promise.reject(new Error('Canvas 2D context unavailable'));
+    const imgData = ctx.createImageData(width, height);
+    this.debayerRggbToImageData(raw, width, height, imgData);
+    ctx.putImageData(imgData, 0, 0);
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error('JPEG encoding failed'))),
+        'image/jpeg',
+        0.92
+      );
+    });
   }
 
   renderPipRoi(raw: Uint8Array, width: number, height: number): void {

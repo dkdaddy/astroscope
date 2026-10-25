@@ -1,10 +1,34 @@
 import type { ClientCommand, TelemetryMessage } from '../../common/protocol.js';
+import { DEFAULT_STRETCH, type StretchParams } from './Viewport.js';
+
+// Logarithmic exposure slider: 0.05 ms .. 10 s over 2000 steps.
+// ~0.6% per step everywhere, so the 0.05-5 ms band still gets ~750 fine steps.
+const EXP_MIN_MS = 0.05;
+const EXP_MAX_MS = 10_000;
+const EXP_STEPS = 2000;
+
+function sliderToExposureUs(pos: number): number {
+  const ms = EXP_MIN_MS * Math.pow(EXP_MAX_MS / EXP_MIN_MS, pos / EXP_STEPS);
+  return Math.round(ms * 1000);
+}
+
+function exposureUsToSlider(us: number): number {
+  const ms = Math.min(EXP_MAX_MS, Math.max(EXP_MIN_MS, us / 1000));
+  return Math.round((EXP_STEPS * Math.log(ms / EXP_MIN_MS)) / Math.log(EXP_MAX_MS / EXP_MIN_MS));
+}
+
+function formatExposure(us: number): string {
+  const ms = us / 1000;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  return `${ms < 10 ? ms.toFixed(2) : ms.toFixed(1)} ms`;
+}
 
 export class CameraSettings {
   constructor(
     private container: HTMLElement,
     private sendCommand: (cmd: ClientCommand) => void,
-    private onStretchChange: (stretch: number) => void
+    private onStretchChange: (stretch: StretchParams) => void,
+    private onAutoStretch: () => StretchParams | null
   ) {
     this.render();
     this.bindEvents();
@@ -20,15 +44,26 @@ export class CameraSettings {
 
         <div class="control-group">
           <div class="control-label-row">
-            <label for="exp-slider">Exposure (ms)</label>
+            <label for="exp-slider">Exposure</label>
             <span id="exp-val" class="mono-val">15.0 ms</span>
           </div>
-          <input id="exp-slider" type="range" min="1" max="200" step="1" value="15" />
+          <input id="exp-slider" type="range" min="0" max="${EXP_STEPS}" step="1" value="${exposureUsToSlider(15000)}" />
           <div class="preset-row">
+            <button type="button" class="btn-chip exp-preset" data-exp="1000">1ms</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="2000">2ms</button>
             <button type="button" class="btn-chip exp-preset" data-exp="5000">5ms (200fps)</button>
             <button type="button" class="btn-chip exp-preset" data-exp="10000">10ms (100fps)</button>
             <button type="button" class="btn-chip exp-preset" data-exp="15000">15ms (66fps)</button>
             <button type="button" class="btn-chip exp-preset" data-exp="30000">30ms (33fps)</button>
+          </div>
+          <div class="preset-row">
+            <button type="button" class="btn-chip exp-preset" data-exp="100000">100ms</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="250000">250ms</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="500000">500ms</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="1000000">1s</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="2000000">2s</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="5000000">5s</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="10000000">10s</button>
           </div>
         </div>
 
@@ -45,19 +80,48 @@ export class CameraSettings {
           </div>
         </div>
 
-        <div class="control-row-split">
-          <div class="control-group">
-            <label for="roi-select">Hardware ROI (Speed)</label>
-            <select id="roi-select">
-              <option value="3840x2160">3840 × 2160 (4K Max)</option>
-              <option value="1920x1080" selected>1920 × 1080 (FHD)</option>
-              <option value="1024x768">1024 × 768 (Fast)</option>
-              <option value="640x480">640 × 480 (Planetary High-FPS)</option>
-            </select>
+        <div class="control-group">
+          <label for="roi-select">Hardware ROI (Speed)</label>
+          <select id="roi-select">
+            <option value="3840x2160">3840 × 2160 (4K Max)</option>
+            <option value="1920x1080" selected>1920 × 1080 (FHD)</option>
+            <option value="1024x768">1024 × 768 (Fast)</option>
+            <option value="640x480">640 × 480 (Planetary High-FPS)</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <div class="control-label-row">
+            <span>Display Stretch</span>
+            <span class="preset-row">
+              <button type="button" id="btn-stretch-auto" class="btn-chip btn-accent">Auto</button>
+              <button type="button" id="btn-stretch-reset" class="btn-chip">Reset</button>
+            </span>
           </div>
-          <div class="control-group">
-            <label for="stretch-slider">Display Stretch</label>
-            <input id="stretch-slider" type="range" min="0.5" max="4.0" step="0.1" value="1.35" />
+          <div class="control-label-row">
+            <label for="stretch-black">Black point</label>
+            <span id="stretch-black-val" class="mono-val">${DEFAULT_STRETCH.black}</span>
+          </div>
+          <input id="stretch-black" type="range" min="0" max="250" step="1" value="${DEFAULT_STRETCH.black}" />
+          <div class="control-label-row">
+            <label for="stretch-white">White point</label>
+            <span id="stretch-white-val" class="mono-val">${DEFAULT_STRETCH.white}</span>
+          </div>
+          <input id="stretch-white" type="range" min="5" max="255" step="1" value="${DEFAULT_STRETCH.white}" />
+          <div class="control-label-row">
+            <label for="stretch-gamma">Gamma (midtones)</label>
+            <span id="stretch-gamma-val" class="mono-val">${DEFAULT_STRETCH.gamma.toFixed(2)}</span>
+          </div>
+          <input id="stretch-gamma" type="range" min="0.3" max="3.0" step="0.05" value="${DEFAULT_STRETCH.gamma}" />
+        </div>
+
+        <div class="control-group">
+          <div class="control-label-row">
+            <span>Live Stack (3 s rolling average)</span>
+            <span id="stack-status" class="mono-val">OFF</span>
+          </div>
+          <div class="preset-row">
+            <button type="button" id="btn-live-stack" class="btn-chip">Enable Live Stack</button>
           </div>
         </div>
 
@@ -72,6 +136,9 @@ export class CameraSettings {
             <button type="button" id="btn-rec-start" class="btn-primary">● Record .SER</button>
             <button type="button" id="btn-rec-stop" class="btn-danger" disabled>■ Stop</button>
           </div>
+          <div class="preset-row">
+            <button type="button" id="btn-snapshot" class="btn-chip">Save Frame (.JPG)</button>
+          </div>
         </div>
       </div>
     `;
@@ -83,22 +150,24 @@ export class CameraSettings {
     const gainSlider = this.container.querySelector('#gain-slider') as HTMLInputElement;
     const gainVal = this.container.querySelector('#gain-val') as HTMLElement;
     const roiSelect = this.container.querySelector('#roi-select') as HTMLSelectElement;
-    const stretchSlider = this.container.querySelector('#stretch-slider') as HTMLInputElement;
+    const stretchBlack = this.container.querySelector('#stretch-black') as HTMLInputElement;
+    const stretchWhite = this.container.querySelector('#stretch-white') as HTMLInputElement;
+    const stretchGamma = this.container.querySelector('#stretch-gamma') as HTMLInputElement;
 
     expSlider.addEventListener('input', () => {
-      const ms = Number(expSlider.value);
-      expVal.textContent = `${ms.toFixed(1)} ms`;
+      const us = sliderToExposureUs(Number(expSlider.value));
+      expVal.textContent = formatExposure(us);
       this.sendCommand({
         action: 'SET_CONFIG',
-        payload: { exposureUs: ms * 1000 }
+        payload: { exposureUs: us }
       });
     });
 
     this.container.querySelectorAll('.exp-preset').forEach((btn) => {
       btn.addEventListener('click', () => {
         const us = Number((btn as HTMLElement).dataset.exp);
-        expSlider.value = String(Math.round(us / 1000));
-        expVal.textContent = `${(us / 1000).toFixed(1)} ms`;
+        expSlider.value = String(exposureUsToSlider(us));
+        expVal.textContent = formatExposure(us);
         this.sendCommand({
           action: 'SET_CONFIG',
           payload: { exposureUs: us }
@@ -137,8 +206,55 @@ export class CameraSettings {
       });
     });
 
-    stretchSlider.addEventListener('input', () => {
-      this.onStretchChange(Number(stretchSlider.value));
+    const blackVal = this.container.querySelector('#stretch-black-val') as HTMLElement;
+    const whiteVal = this.container.querySelector('#stretch-white-val') as HTMLElement;
+    const gammaVal = this.container.querySelector('#stretch-gamma-val') as HTMLElement;
+
+    const setStretchControls = (p: StretchParams) => {
+      stretchBlack.value = String(p.black);
+      stretchWhite.value = String(p.white);
+      stretchGamma.value = String(p.gamma);
+    };
+
+    const applyStretch = (changed?: 'black' | 'white') => {
+      let black = Number(stretchBlack.value);
+      let white = Number(stretchWhite.value);
+      // Keep black below white, moving whichever slider the user didn't touch
+      if (white - black < 5) {
+        if (changed === 'white') black = Math.max(0, white - 5);
+        else white = Math.min(255, black + 5);
+        stretchBlack.value = String(black);
+        stretchWhite.value = String(white);
+      }
+      const gamma = Number(stretchGamma.value);
+      blackVal.textContent = String(black);
+      whiteVal.textContent = String(white);
+      gammaVal.textContent = gamma.toFixed(2);
+      this.onStretchChange({ black, white, gamma });
+    };
+
+    stretchBlack.addEventListener('input', () => applyStretch('black'));
+    stretchWhite.addEventListener('input', () => applyStretch('white'));
+    stretchGamma.addEventListener('input', () => applyStretch());
+
+    (this.container.querySelector('#btn-stretch-auto') as HTMLButtonElement).addEventListener('click', () => {
+      const auto = this.onAutoStretch();
+      if (!auto) return;
+      setStretchControls(auto);
+      applyStretch();
+    });
+
+    (this.container.querySelector('#btn-stretch-reset') as HTMLButtonElement).addEventListener('click', () => {
+      setStretchControls(DEFAULT_STRETCH);
+      applyStretch();
+    });
+
+    const btnLiveStack = this.container.querySelector('#btn-live-stack') as HTMLButtonElement;
+    btnLiveStack.addEventListener('click', () => {
+      this.sendCommand({
+        action: 'SET_LIVE_STACK',
+        payload: { enabled: btnLiveStack.dataset.enabled !== 'true' }
+      });
     });
 
     const btnRecStart = this.container.querySelector('#btn-rec-start') as HTMLButtonElement;
@@ -158,6 +274,21 @@ export class CameraSettings {
     btnRecStop.addEventListener('click', () => {
       this.sendCommand({ action: 'STOP_RECORDING' });
     });
+
+    const btnSnapshot = this.container.querySelector('#btn-snapshot') as HTMLButtonElement;
+    btnSnapshot.addEventListener('click', () => {
+      this.setSnapshotBusy(true);
+      this.sendCommand({ action: 'GRAB_SNAPSHOT' });
+      // Fallback in case no frame arrives (e.g. camera stalled or disconnected)
+      setTimeout(() => this.setSnapshotBusy(false), 15000);
+    });
+  }
+
+  setSnapshotBusy(busy: boolean): void {
+    const btn = this.container.querySelector('#btn-snapshot') as HTMLButtonElement | null;
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.textContent = busy ? 'Saving...' : 'Save Frame (.JPG)';
   }
 
   updateFromTelemetry(tel: TelemetryMessage): void {
@@ -173,6 +304,26 @@ export class CameraSettings {
     }
 
     const recStatus = this.container.querySelector('#rec-status') as HTMLElement;
+
+    const btnLiveStack = this.container.querySelector('#btn-live-stack') as HTMLButtonElement | null;
+    const stackStatus = this.container.querySelector('#stack-status') as HTMLElement | null;
+    if (btnLiveStack && stackStatus) {
+      const stack = tel.camera.liveStack;
+      const enabled = Boolean(stack?.enabled);
+      btnLiveStack.dataset.enabled = String(enabled);
+      btnLiveStack.textContent = enabled ? 'Disable Live Stack' : 'Enable Live Stack';
+      btnLiveStack.classList.toggle('btn-accent', enabled);
+      stackStatus.textContent = enabled ? `ON (${stack?.frames ?? 0} frames)` : 'OFF';
+      stackStatus.style.color = enabled ? '#34d399' : '#94a3b8';
+    }
+
+    const roiSelect = this.container.querySelector('#roi-select') as HTMLSelectElement;
+    const roiValue = `${tel.camera.roi.width}x${tel.camera.roi.height}`;
+    if (roiSelect && document.activeElement !== roiSelect && roiSelect.value !== roiValue) {
+      if (Array.from(roiSelect.options).some((o) => o.value === roiValue)) {
+        roiSelect.value = roiValue;
+      }
+    }
     const btnStart = this.container.querySelector('#btn-rec-start') as HTMLButtonElement;
     const btnStop = this.container.querySelector('#btn-rec-stop') as HTMLButtonElement;
 

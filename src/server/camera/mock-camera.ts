@@ -553,7 +553,9 @@ export class MockCameraDriver implements ICameraDriver {
     const pB = this.patchB;
     const lut = this.noiseLut;
     const lutMask = lut.length - 1;
-    let nIdx = this.noiseIdx;
+    const deterministicNoiseSeed =
+      ((this.params.focuserPosition + 1) * 131 + this.roi.width * 17 + this.roi.height * 13 + this.frameCounter * 29) & lutMask;
+    let nIdx = (this.noiseIdx + deterministicNoiseSeed) & lutMask;
 
     for (let y = 0; y < height; y++) {
       const py = y - patchOriginY;

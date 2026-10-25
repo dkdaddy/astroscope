@@ -12,7 +12,8 @@ export const PIXEL_FORMAT = {
 
 export const FRAME_TYPE = {
   VIEWPORT_PREVIEW: 0,
-  FOCUS_ROI_CROP: 1
+  FOCUS_ROI_CROP: 1,
+  SNAPSHOT: 2
 } as const;
 
 export interface BinaryFrameHeader {
@@ -118,6 +119,12 @@ export type ClientCommand =
       payload: Partial<MockCameraParams>;
     }
   | {
+      action: 'SET_CAMERA_MODE';
+      payload: {
+        useMock: boolean;
+      };
+    }
+  | {
       action: 'START_RECORDING';
       payload: {
         filename?: string;
@@ -127,6 +134,15 @@ export type ClientCommand =
     }
   | {
       action: 'STOP_RECORDING';
+    }
+  | {
+      action: 'GRAB_SNAPSHOT';
+    }
+  | {
+      action: 'SET_LIVE_STACK';
+      payload: {
+        enabled: boolean;
+      };
     }
   | {
       action: 'MOUNT_JOG';
@@ -164,6 +180,11 @@ export interface TelemetryMessage {
     isRecording: boolean;
     recordedFrames: number;
     recordingFile?: string;
+    liveStack?: {
+      enabled: boolean;
+      frames: number;
+      windowSec: number;
+    };
     mock?: {
       scene: string;
       focuserPosition: number;

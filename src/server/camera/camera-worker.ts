@@ -14,6 +14,10 @@ import {
 import { MockCameraDriver } from './mock-camera.js';
 import { ZwoKoffiDriver } from './camera-driver.js';
 import { SerWriter } from './ser-writer.js';
+import { LiveStacker } from './live-stack.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('camera-worker');
 
 /**
  * Computes Bayer super-pixel (2x2 RGGB -> luminance) Laplacian variance on a sub-ROI
@@ -45,10 +49,10 @@ export function computeBayerRoiFocusScore(
     for (let sx = 0; sx < lumaW; sx++) {
       const c = sx * 2;
       if (is16Bit) {
-        const vR = frame.readUInt16LE((r0 + c) * 2) >> 8;
-        const vG1 = frame.readUInt16LE((r0 + c + 1) * 2) >> 8;
-        const vG2 = frame.readUInt16LE((r1 + c) * 2) >> 8;
-        const vB = frame.readUInt16LE((r1 + c + 1) * 2) >> 8;
+        const vR = frame.readUInt16LE((r0 + c) * 2);
+        const vG1 = frame.readUInt16LE((r0 + c + 1) * 2);
+        const vG2 = frame.readUInt16LE((r1 + c) * 2);
+        const vB = frame.readUInt16LE((r1 + c + 1) * 2);
         luma[outRow + sx] = 0.25 * (vR + vG1 + vG2 + vB);
       } else {
         const vR = frame[r0 + c];
@@ -60,26 +64,44 @@ export function computeBayerRoiFocusScore(
     }
   }
 
-  // Compute 3x3 Laplacian variance + top-gradient energy normalized by mean intensity
-  // so exposure/gain changes don't wildly skew the focus curve and vibration motion doesn't break peak detection
+  // Light 3x3 binomial smoothing suppresses per-pixel sensor noise, which otherwise
+  // dominates the Laplacian and gives a high score floor even when badly defocused.
+  const tmp = new Float32Array(lumaW * lumaH);
+  for (let y = 0; y < lumaH; y++) {
+    const row = y * lumaW;
+    for (let x = 1; x < lumaW - 1; x++) {
+      const i = row + x;
+      tmp[i] = 0.25 * luma[i - 1] + 0.5 * luma[i] + 0.25 * luma[i + 1];
+    }
+  }
+  const smooth = new Float32Array(lumaW * lumaH);
+  for (let y = 1; y < lumaH - 1; y++) {
+    const row = y * lumaW;
+    for (let x = 0; x < lumaW; x++) {
+      const i = row + x;
+      smooth[i] = 0.25 * tmp[i - lumaW] + 0.5 * tmp[i] + 0.25 * tmp[i + lumaW];
+    }
+  }
+
+  // Laplacian variance normalized by mean brightness^2, so changes in light level
+  // (clouds, sun, exposure, gain) don't move the score; only sharpness does.
   let sum = 0;
   let sumSq = 0;
   let lumaSum = 0;
-  const count = (lumaW - 2) * (lumaH - 2);
+  const count = (lumaW - 4) * (lumaH - 4);
 
-  for (let y = 1; y < lumaH - 1; y++) {
+  for (let y = 2; y < lumaH - 2; y++) {
     const row = y * lumaW;
     const prev = (y - 1) * lumaW;
     const next = (y + 1) * lumaW;
-    for (let x = 1; x < lumaW - 1; x++) {
-      const center = luma[row + x];
-      lumaSum += center;
+    for (let x = 2; x < lumaW - 2; x++) {
+      lumaSum += luma[row + x];
       const lap =
-        luma[prev + x] +
-        luma[row + x - 1] -
-        4 * center +
-        luma[row + x + 1] +
-        luma[next + x];
+        smooth[prev + x] +
+        smooth[row + x - 1] -
+        4 * smooth[row + x] +
+        smooth[row + x + 1] +
+        smooth[next + x];
       sum += lap;
       sumSq += lap * lap;
     }
@@ -87,7 +109,9 @@ export function computeBayerRoiFocusScore(
 
   const meanLap = sum / count;
   const variance = Math.max(0, sumSq / count - meanLap * meanLap);
-  return Number(variance.toFixed(2));
+  const meanLuma = Math.max(1, lumaSum / count);
+  // Scaled so real terrestrial/lunar frames land roughly in the 1-100+ range used by the HUD.
+  return Number(((100000 * variance) / (meanLuma * meanLuma)).toFixed(2));
 }
 
 /**
@@ -198,6 +222,10 @@ if (parentPort) {
   let recordLimitValue = 0;
   let recordStartMs = 0;
   let recordingFile = '';
+  let snapshotRequested = false;
+  const LIVE_STACK_WINDOW_MS = 3000;
+  const liveStack = new LiveStacker(LIVE_STACK_WINDOW_MS);
+  let liveStackEnabled = false;
 
   // FPS tracking
   let fpsFrameCount = 0;
@@ -217,11 +245,21 @@ if (parentPort) {
       driver = new MockCameraDriver();
       isMock = true;
     }
+    log.info(`Startup driver: ${isMock ? 'simulator' : 'real camera'} (ASTROSCOPE_MOCK=${process.env.ASTROSCOPE_MOCK ?? 'unset'})`);
 
     const props = await driver.initialize();
+    if (!isMock) {
+      currentRoi = { x: 0, y: 0, width: props.maxWidth, height: props.maxHeight, bin: 1 };
+    }
     await driver.setGain(gain);
     await driver.setExposure(exposureUs);
     currentRoi = await driver.setROI(currentRoi);
+    focusRoi = {
+      ...focusRoi,
+      x: Math.floor((currentRoi.width - focusRoi.width) / 4) * 2,
+      y: Math.floor((currentRoi.height - focusRoi.height) / 4) * 2
+    };
+    log.info('Hardware ROI set', { roi: currentRoi, focusRoi });
 
     parentPort?.postMessage({
       type: 'INITIALIZED',
@@ -230,7 +268,10 @@ if (parentPort) {
       focusRoi
     });
 
-    await driver.startCapture((frameBuf, frameNumber, timestampTicks) => {
+    await driver.startCapture(handleFrame);
+  };
+
+  function handleFrame(frameBuf: Buffer, frameNumber: number, timestampTicks: bigint): void {
       const now = Date.now();
       fpsFrameCount++;
       if (now - lastFpsCalcMs >= 500) {
@@ -275,16 +316,58 @@ if (parentPort) {
         fps: measuredFps
       });
 
+      // Live stack: viewport, focus PIP and snapshots show the rolling average of the last 3 s.
+      // Focus score and SER recording always use the live frame.
+      let displayFrame: Buffer = frameBuf;
+      let display16 = bitDepth === 16;
+      if (liveStackEnabled) {
+        const stacked = liveStack.push(frameBuf, currentRoi.width, currentRoi.height, display16, now);
+        if (stacked) {
+          displayFrame = stacked;
+          display16 = false;
+        }
+      }
+
+      // Full-resolution single frame for JPG snapshot (encoded in the browser)
+      if (snapshotRequested) {
+        snapshotRequested = false;
+        const pixelCount = currentRoi.width * currentRoi.height;
+        const raw8 = new Uint8Array(pixelCount);
+        if (display16) {
+          for (let i = 0; i < pixelCount; i++) raw8[i] = displayFrame.readUInt16LE(i * 2) >> 8;
+        } else {
+          displayFrame.copy(raw8, 0, 0, pixelCount);
+        }
+        const packet = packBinaryFrame(
+          {
+            frameNumber,
+            width: currentRoi.width,
+            height: currentRoi.height,
+            pixelFormat: PIXEL_FORMAT.RAW8_RGGB,
+            frameType: FRAME_TYPE.SNAPSHOT,
+            binFactor: 1,
+            serverScore: latestFocusScore
+          },
+          raw8
+        );
+        const snapshotBuffer = packet.buffer.slice(
+          packet.byteOffset,
+          packet.byteOffset + packet.byteLength
+        ) as ArrayBuffer;
+        parentPort?.postMessage({ type: 'SNAPSHOT', buffer: snapshotBuffer }, [snapshotBuffer]);
+        log.info(`Snapshot grabbed (${currentRoi.width}x${currentRoi.height}, frame ${frameNumber}${liveStackEnabled ? `, stacked ${liveStack.frameCount}` : ''})`);
+      }
+
       // 3. Throttle full binary viewport preview + 1:1 ROI crop to ~25 FPS max
       if (now - lastPreviewSentMs >= 38) {
         lastPreviewSentMs = now;
 
         // Send binned full viewport frame
         const { data, outWidth, outHeight, binFactor } = downsampleBayerFrame(
-          frameBuf,
+          displayFrame,
           currentRoi.width,
           currentRoi.height,
-          bitDepth === 16
+          display16
         );
         const viewportPacket = packBinaryFrame(
           {
@@ -301,11 +384,11 @@ if (parentPort) {
 
         // Send 1:1 native resolution focus ROI crop for the zoom PIP window
         const { crop, width: cropW, height: cropH } = cropRaw8Subframe(
-          frameBuf,
+          displayFrame,
           currentRoi.width,
           currentRoi.height,
           focusRoi,
-          bitDepth === 16
+          display16
         );
         const roiPacket = packBinaryFrame(
           {
@@ -344,13 +427,73 @@ if (parentPort) {
           ]
         );
       }
+  }
+
+  const switchDriverMode = async (useMock: boolean) => {
+    log.info(`Mode switch requested: ${useMock ? 'simulator' : 'real camera'}`);
+    const zwo = new ZwoKoffiDriver();
+    const realAvailable = !useMock && zwo.isAvailable();
+    if (!useMock && !realAvailable) {
+      log.warn('Real camera requested but not available; staying on simulator');
+    }
+
+    if (driver) {
+      try { await driver.stopCapture(); } catch (err) { log.warn('stopCapture failed', err); }
+      try { await driver.close(); } catch (err) { log.warn('close failed', err); }
+    }
+
+    let props;
+    if (realAvailable) {
+      driver = zwo;
+      isMock = false;
+      try {
+        props = await driver.initialize();
+      } catch (err) {
+        log.error('Real camera initialize failed; falling back to simulator', err);
+        driver = new MockCameraDriver();
+        isMock = true;
+        props = await driver.initialize();
+      }
+    } else {
+      driver = new MockCameraDriver();
+      isMock = true;
+      props = await driver.initialize();
+    }
+    log.info(`Active driver: ${isMock ? 'simulator' : 'real camera'}`, { name: props.name });
+    if (!isMock) {
+      currentRoi = { x: 0, y: 0, width: props.maxWidth, height: props.maxHeight, bin: 1 };
+    }
+
+    await driver.setGain(gain);
+    await driver.setExposure(exposureUs);
+    currentRoi = await driver.setROI(currentRoi);
+    focusRoi = {
+      x: Math.max(0, Math.min(currentRoi.width - focusRoi.width, Math.floor((currentRoi.width - focusRoi.width) / 4) * 2)),
+      y: Math.max(0, Math.min(currentRoi.height - focusRoi.height, Math.floor((currentRoi.height - focusRoi.height) / 4) * 2)),
+      width: Math.min(focusRoi.width, currentRoi.width),
+      height: Math.min(focusRoi.height, currentRoi.height)
+    };
+    log.info('Hardware ROI set', { roi: currentRoi, focusRoi });
+
+    parentPort?.postMessage({
+      type: 'INITIALIZED',
+      properties: props,
+      roi: currentRoi,
+      focusRoi
     });
+
+    liveStack.reset();
+    await driver.startCapture(handleFrame);
   };
 
   parentPort.on('message', async (msg: any) => {
     try {
-      if (msg.type === 'SET_CONFIG') {
+      if (msg.type === 'SET_CAMERA_MODE') {
+        await switchDriverMode(Boolean(msg.payload?.useMock));
+      } else if (msg.type === 'SET_CONFIG') {
         const p = msg.payload;
+        // Any change to brightness, bit depth or framing invalidates the stacked frames
+        liveStack.reset();
         if (typeof p.gain === 'number') {
           gain = p.gain;
           await driver.setGain(gain);
@@ -404,6 +547,12 @@ if (parentPort) {
         recordLimitType = msg.payload.limitType || 'FRAMES';
         recordLimitValue = msg.payload.limitValue || 500;
         recordStartMs = Date.now();
+      } else if (msg.type === 'GRAB_SNAPSHOT') {
+        snapshotRequested = true;
+      } else if (msg.type === 'SET_LIVE_STACK') {
+        liveStackEnabled = Boolean(msg.payload?.enabled);
+        liveStack.reset();
+        log.info(`Live stack ${liveStackEnabled ? 'enabled' : 'disabled'} (${LIVE_STACK_WINDOW_MS} ms window)`);
       } else if (msg.type === 'STOP_RECORDING') {
         if (serWriter) {
           serWriter.close();
@@ -436,6 +585,11 @@ if (parentPort) {
             isRecording: serWriter !== null,
             recordedFrames: serWriter ? serWriter.getRecordedFrames() : 0,
             recordingFile: serWriter ? path.basename(recordingFile) : undefined,
+            liveStack: {
+              enabled: liveStackEnabled,
+              frames: liveStackEnabled ? liveStack.frameCount : 0,
+              windowSec: LIVE_STACK_WINDOW_MS / 1000
+            },
             mock: mockParams
               ? {
                   scene: mockParams.scene,
@@ -449,6 +603,7 @@ if (parentPort) {
         });
       }
     } catch (err: any) {
+      log.error(`Error handling worker message ${msg?.type}`, err);
       parentPort?.postMessage({
         type: 'ERROR',
         message: err?.message ?? String(err)
@@ -457,6 +612,7 @@ if (parentPort) {
   });
 
   initWorker().catch((err) => {
+    log.error('initWorker failed', err);
     parentPort?.postMessage({
       type: 'ERROR',
       message: err?.message ?? String(err)

@@ -65,6 +65,40 @@ body {
   border-radius: 4px;
 }
 
+.camera-title-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.header-mode-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.header-mode-btn.is-active {
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.18), rgba(16, 185, 129, 0.18));
+  color: var(--text-main);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.35);
+}
+
 .telemetry-strip {
   display: flex;
   gap: 14px;
@@ -317,7 +351,62 @@ body {
   color: #22d3ee;
   border: 1px solid rgba(34, 211, 238, 0.35);
 }
+.camera-mode-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.75);
+}
 
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 94px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border: 1px solid transparent;
+}
+
+.source-simulated {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #fbbf24;
+}
+
+.source-camera {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #34d399;
+}
+
+.mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mode-toggle-btn {
+  border: 1px solid var(--border-subtle);
+  background: #0b1220;
+  color: var(--text-main);
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: 120ms ease;
+}
+
+.mode-toggle-btn.is-active {
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.18), rgba(16, 185, 129, 0.18));
+  border-color: var(--accent-cyan);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.35);
+}
 .control-group {
   display: flex;
   flex-direction: column;

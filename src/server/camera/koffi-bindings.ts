@@ -1,6 +1,9 @@
 import koffi from 'koffi';
 import path from 'node:path';
 import fs from 'node:fs';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('asi-sdk');
 
 export const ASI_ERROR_CODE = {
   SUCCESS: 0,
@@ -54,20 +57,107 @@ export const ASI_BAYER_PATTERN = {
   GB: 3
 } as const;
 
-export function resolveSdkLibraryPath(): string {
-  const binDir = path.resolve(process.cwd(), 'bin');
-  if (process.platform === 'win32') return path.join(binDir, 'ASICamera2.dll');
-  if (process.platform === 'darwin') return path.join(binDir, 'libASICamera2.dylib');
-  return path.join(binDir, 'libASICamera2.so');
+function normalizeAsiCandidates(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+
+  for (const value of values) {
+    if (!value) continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    candidates.push(trimmed);
+  }
+
+  return candidates;
 }
 
+function findLibraryInDirectory(dir: string, names: string[]): string | null {
+  if (!dir || !fs.existsSync(dir)) return null;
+
+  for (const name of names) {
+    const candidate = path.join(dir, name);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+export function resolveSdkLibraryPath(): string {
+  const libraryNames = process.platform === 'win32'
+    ? ['ASICamera2.dll', 'ASICamera2_x64.dll']
+    : process.platform === 'darwin'
+      ? ['libASICamera2.dylib']
+      : ['libASICamera2.so'];
+
+  const projectBinDir = path.resolve(process.cwd(), 'bin');
+  const envDirs = normalizeAsiCandidates([
+    process.env.ASTROSCOPE_ASI_SDK_PATH,
+    process.env.ASI_SDK_PATH,
+    process.env.ASICAMERA2_PATH,
+    process.env.ASI_CAMERA2_PATH
+  ]);
+
+  const baseSearchDirs = [
+    ...envDirs,
+    projectBinDir,
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles ?? '', 'ASIStudio') : '',
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles ?? '', 'ASI Studio') : '',
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'] ?? '', 'ASIStudio') : '',
+    process.env['ProgramFiles(x86)'] ? path.join(process.env['ProgramFiles(x86)'] ?? '', 'ASI Studio') : '',
+    'C:\\Program Files\\ASIStudio',
+    'C:\\Program Files\\ASI Studio',
+    'C:\\Program Files\\ZWO\\ASI Studio',
+    'C:\\Program Files (x86)\\ASI Studio',
+    'C:\\Program Files (x86)\\ZWO\\ASI Studio'
+  ].filter(Boolean);
+
+  const searchDirs = Array.from(new Set(
+    baseSearchDirs.flatMap((dir) => [dir, path.join(dir, 'x64'), path.join(dir, 'bin'), path.join(dir, 'lib')])
+  ));
+
+  const searchFiles = normalizeAsiCandidates([
+    ...envDirs.map((entry) => {
+      const normalized = path.normalize(entry);
+      return fs.existsSync(normalized) && fs.statSync(normalized).isDirectory() ? undefined : normalized;
+    }),
+    ...searchDirs.map((dir) => findLibraryInDirectory(dir, libraryNames) ?? undefined)
+  ]);
+
+  for (const candidate of searchFiles) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+
+  for (const dir of searchDirs) {
+    const found = findLibraryInDirectory(dir, libraryNames);
+    if (found) return found;
+  }
+
+  return path.join(projectBinDir, libraryNames[0]);
+}
+
+let cachedSdk: ReturnType<typeof loadAsiSdkUncached> = null;
+
+// koffi throws "Duplicate type name" if ASI_CAMERA_INFO is registered twice,
+// so the SDK must be loaded only once per thread.
 export function loadAsiSdk() {
+  if (!cachedSdk) cachedSdk = loadAsiSdkUncached();
+  return cachedSdk;
+}
+
+function loadAsiSdkUncached() {
   const libPath = resolveSdkLibraryPath();
   if (!fs.existsSync(libPath)) {
+    log.warn(`ASI SDK library not found (last candidate: ${libPath})`);
     return null;
   }
 
   try {
+    log.info(`Loading ASI SDK from ${libPath}`);
     const lib = koffi.load(libPath);
 
     const ASI_CAMERA_INFO = koffi.struct('ASI_CAMERA_INFO', {
@@ -108,7 +198,8 @@ export function loadAsiSdk() {
       ASIStopVideoCapture: lib.func('int ASIStopVideoCapture(int iCameraID)'),
       ASIGetVideoData: lib.func('int ASIGetVideoData(int iCameraID, _Out_ uint8_t *pBuffer, long lBuffSize, int iWaitms)')
     };
-  } catch {
+  } catch (err) {
+    log.error(`Failed to load ASI SDK from ${libPath}`, err);
     return null;
   }
 }

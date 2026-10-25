@@ -26,6 +26,7 @@ const statTempEl = document.getElementById('stat-temp') as HTMLElement;
 const statNoiseEl = document.getElementById('stat-noise') as HTMLElement;
 const wsStatusEl = document.getElementById('ws-status') as HTMLElement;
 const cameraModelEl = document.getElementById('camera-model') as HTMLElement;
+const headerModeButtons = Array.from(document.querySelectorAll('.header-mode-btn')) as HTMLButtonElement[];
 
 let ws: WebSocket | null = null;
 
@@ -48,8 +49,19 @@ const viewport = new Viewport(mainCanvas, pipCanvas, (newFocusRoi) => {
 const cameraSettings = new CameraSettings(
   document.getElementById('camera-settings-mount') as HTMLElement,
   sendCommand,
-  (stretch) => viewport.setStretchGain(stretch)
+  (stretch) => viewport.setStretch(stretch),
+  () => viewport.computeAutoStretch()
 );
+
+headerModeButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const useMock = btn.dataset.mode === 'mock';
+    sendCommand({
+      action: 'SET_CAMERA_MODE',
+      payload: { useMock }
+    });
+  });
+});
 
 const mountControl = new MountControl(
   document.getElementById('mount-control-mount') as HTMLElement,
@@ -108,6 +120,19 @@ function connectWebSocket(): void {
         // Client-side Bayer-aware Laplacian verification on 1:1 native ROI crop
         const clientScore = computeBayerFocusScore(payload, header.width, header.height);
         updateFocusHud(header.serverScore > 0 ? header.serverScore : clientScore);
+      } else if (header.frameType === FRAME_TYPE.SNAPSHOT) {
+        viewport
+          .exportJpeg(payload, header.width, header.height)
+          .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `AstroScope_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          })
+          .catch((err) => console.error('Snapshot failed', err))
+          .finally(() => cameraSettings.setSnapshotBusy(false));
       }
     } else if (typeof event.data === 'string') {
       const msg = JSON.parse(event.data);
@@ -120,6 +145,10 @@ function connectWebSocket(): void {
       } else if (msg.type === 'TELEMETRY') {
         const tel = msg as TelemetryMessage;
         cameraModelEl.textContent = tel.camera.name;
+        headerModeButtons.forEach((btn) => {
+          const isActive = tel.camera.isMock === (btn.dataset.mode === 'mock');
+          btn.classList.toggle('is-active', isActive);
+        });
         statFpsEl.textContent = `${tel.camera.fps.toFixed(1)}`;
         statTempEl.textContent = `${tel.camera.temperatureC.toFixed(1)} °C`;
         statNoiseEl.textContent = `${tel.camera.readNoiseElec.toFixed(2)} e-`;

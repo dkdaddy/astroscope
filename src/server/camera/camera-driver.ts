@@ -10,6 +10,9 @@ import {
   loadAsiSdk
 } from './koffi-bindings.js';
 import { dateToSerTicks } from './ser-writer.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('zwo-driver');
 
 export class ZwoKoffiDriver implements ICameraDriver {
   private sdk = loadAsiSdk();
@@ -21,10 +24,16 @@ export class ZwoKoffiDriver implements ICameraDriver {
   private frameCounter = 0;
 
   isAvailable(): boolean {
-    if (!this.sdk) return false;
+    if (!this.sdk) {
+      log.warn('isAvailable: SDK not loaded');
+      return false;
+    }
     try {
-      return this.sdk.ASIGetNumOfConnectedCameras() > 0;
-    } catch {
+      const count = this.sdk.ASIGetNumOfConnectedCameras();
+      log.info(`isAvailable: ASIGetNumOfConnectedCameras() = ${count}`);
+      return count > 0;
+    } catch (err) {
+      log.error('isAvailable: ASIGetNumOfConnectedCameras threw', err);
       return false;
     }
   }
@@ -62,6 +71,14 @@ export class ZwoKoffiDriver implements ICameraDriver {
     const rawName = Array.isArray(info.Name)
       ? Buffer.from(info.Name).toString('ascii').replace(/\0.*$/, '')
       : 'ZWO ASI678MC';
+
+    log.info('Camera initialized', {
+      cameraId: this.cameraId,
+      name: rawName,
+      maxWidth,
+      maxHeight,
+      bitDepth: info.BitDepth
+    });
 
     return {
       cameraId: this.cameraId,

@@ -9,6 +9,9 @@ import type { WebSocket } from 'ws';
 import type { ClientCommand } from '../common/protocol.js';
 import { MountController } from './mount/mount-controller.js';
 import { AppState } from './state/app-state.js';
+import { createLogger, LOG_FILE_PATH } from './logger.js';
+
+const log = createLogger('server');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,8 +38,12 @@ export async function createAstroScopeServer(port = 3000) {
   const localWorkerPath = path.resolve(__dirname, './camera/camera-worker.js');
   const workerPath = fs.existsSync(localWorkerPath) ? localWorkerPath : distWorkerPath;
   const worker = new Worker(workerPath);
+  log.info(`Camera worker started from ${workerPath}`);
+  worker.on('error', (err) => log.error('Camera worker crashed', err));
+  worker.on('exit', (code) => log.warn(`Camera worker exited with code ${code}`));
 
   const clients = new Set<WebSocket>();
+  const snapshotRequesters = new Set<WebSocket>();
 
   // Forward mount sky offsets to Mock Camera
   mount.on('skyOffsetChanged', (skyOffsetPx) => {
@@ -65,9 +72,17 @@ export async function createAstroScopeServer(port = 3000) {
   };
 
   worker.on('message', (msg: any) => {
-    if (msg.type === 'BINARY_FRAMES') {
+    if (msg.type === 'ERROR') {
+      log.error(`Camera worker reported error: ${msg.message}`);
+    } else if (msg.type === 'BINARY_FRAMES') {
       broadcastBinary(msg.viewportBuffer);
       broadcastBinary(msg.roiBuffer);
+    } else if (msg.type === 'SNAPSHOT') {
+      const u8 = new Uint8Array(msg.buffer);
+      for (const ws of snapshotRequesters) {
+        if (ws.readyState === 1) ws.send(u8, { binary: true });
+      }
+      snapshotRequesters.clear();
     } else if (msg.type === 'FOCUS_SCORE') {
       // High-rate lightweight JSON packet for instantaneous focus bar/graph updates
       broadcastJson({
@@ -120,23 +135,32 @@ export async function createAstroScopeServer(port = 3000) {
             worker.postMessage({ type: 'SET_FOCUS_ROI', payload: cmd.payload });
           } else if (cmd.action === 'SET_MOCK_PARAMS') {
             worker.postMessage({ type: 'SET_MOCK_PARAMS', payload: cmd.payload });
+          } else if (cmd.action === 'SET_CAMERA_MODE') {
+            log.info('Client requested camera mode', cmd.payload);
+            worker.postMessage({ type: 'SET_CAMERA_MODE', payload: cmd.payload });
           } else if (cmd.action === 'START_RECORDING') {
             worker.postMessage({ type: 'START_RECORDING', payload: cmd.payload });
           } else if (cmd.action === 'STOP_RECORDING') {
             worker.postMessage({ type: 'STOP_RECORDING' });
+          } else if (cmd.action === 'GRAB_SNAPSHOT') {
+            snapshotRequesters.add(socket);
+            worker.postMessage({ type: 'GRAB_SNAPSHOT' });
+          } else if (cmd.action === 'SET_LIVE_STACK') {
+            worker.postMessage({ type: 'SET_LIVE_STACK', payload: { enabled: Boolean(cmd.payload?.enabled) } });
           } else if (cmd.action === 'MOUNT_JOG') {
             mount.jog(cmd.payload.direction, cmd.payload.speed, cmd.payload.durationMs);
           } else if (cmd.action === 'MOUNT_TRACKING') {
             mount.setTracking(cmd.payload.tracking, cmd.payload.trackRate);
           }
           worker.postMessage({ type: 'GET_STATUS' });
-        } catch {
-          // Ignore malformed messages
+        } catch (err) {
+          log.warn('Ignoring malformed client message', err);
         }
       });
 
       socket.on('close', () => {
         clients.delete(socket);
+        snapshotRequesters.delete(socket);
       });
     });
   });
@@ -156,5 +180,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const port = Number(process.env.PORT || 3000);
   createAstroScopeServer(port).then(() => {
     console.log(`[AstroScope] Server listening on http://localhost:${port}`);
+    console.log(`[AstroScope] Logging to ${LOG_FILE_PATH}`);
+    log.info(`Server listening on port ${port}`);
+  }).catch((err) => {
+    log.error('Server failed to start', err);
+    process.exit(1);
   });
 }
