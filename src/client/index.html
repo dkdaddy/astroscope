@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AstroScope | ZWO ASI678MC Capture &amp; Focus Assistant</title>
+    <link rel="stylesheet" href="./styles/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <h1>ASTROSCOPE</h1>
+        <span id="camera-model" class="subtitle">ZWO ASI678MC (Simulated)</span>
+      </div>
+      <div class="telemetry-strip">
+        <div class="stat-pill">
+          <span class="stat-label">CAPTURE FPS</span>
+          <span id="stat-fps" class="stat-value">0.0</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">SENSOR TEMP</span>
+          <span id="stat-temp" class="stat-value">21.4 °C</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">READ NOISE</span>
+          <span id="stat-noise" class="stat-value">0.85 e-</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">LINK</span>
+          <span id="ws-status" class="stat-value status-online">CONNECTED</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace-grid">
+      <!-- Left / Center: Live Viewport + High-Visibility Hands-Free Focus Assistant Banner -->
+      <section class="viewport-column">
+        <!-- Giant Real-Time Focus HUD (Readable from across the telescope while turning the knob!) -->
+        <div class="focus-hud-card">
+          <div class="focus-readout-block">
+            <div class="focus-title-row">
+              <span class="focus-label">REAL-TIME FOCUS SCORE (LAPLACIAN)</span>
+              <span id="focus-lock-pill" class="badge badge-amber">ADJUSTING</span>
+            </div>
+            <div class="focus-big-numbers">
+              <span id="focus-score-big" class="focus-score-giant">0.0</span>
+              <div class="focus-peak-meta">
+                <div>PEAK: <strong id="focus-peak-val">0.0</strong></div>
+                <div>QUALITY: <strong id="focus-pct-val">0%</strong></div>
+                <button type="button" id="btn-reset-peak" class="btn-chip">Reset Peak</button>
+              </div>
+            </div>
+            <!-- Instant visual gauge bar -->
+            <div class="focus-meter-track">
+              <div id="focus-meter-fill" class="focus-meter-fill" style="width: 0%"></div>
+            </div>
+          </div>
+
+          <div class="focus-graph-wrapper">
+            <canvas id="focus-graph-canvas" width="460" height="105"></canvas>
+          </div>
+
+          <!-- 1:1 Native Pixel Resolution Focus ROI Picture-in-Picture -->
+          <div class="pip-wrapper">
+            <div class="pip-label">1:1 NATIVE ROI</div>
+            <canvas id="pip-canvas" width="200" height="200"></canvas>
+          </div>
+        </div>
+
+        <!-- Main Live Camera Canvas -->
+        <div class="main-canvas-container">
+          <canvas id="main-viewport-canvas" width="960" height="540"></canvas>
+          <div class="canvas-overlay-hint">
+            Click or drag anywhere on the image to position the 1:1 Focus ROI box
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Sidebar: Focuser Simulator, Camera Controls & Mount Hand Controller -->
+      <aside class="controls-column">
+        <div id="mount-control-mount"></div>
+        <div id="camera-settings-mount"></div>
+      </aside>
+    </main>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
