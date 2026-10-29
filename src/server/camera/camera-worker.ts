@@ -9,12 +9,13 @@ import {
   FRAME_TYPE,
   PIXEL_FORMAT,
   packBinaryFrame,
-  type FocusROI
+  type FocusROI,
+  type LiveStackMode
 } from '../../common/protocol.js';
 import { MockCameraDriver } from './mock-camera.js';
 import { ZwoKoffiDriver } from './camera-driver.js';
 import { SerWriter } from './ser-writer.js';
-import { LiveStacker } from './live-stack.js';
+import { DEFAULT_STACK_WINDOW_SEC, LiveStacker } from './live-stack.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('camera-worker');
@@ -223,8 +224,9 @@ if (parentPort) {
   let recordStartMs = 0;
   let recordingFile = '';
   let snapshotRequested = false;
-  const LIVE_STACK_WINDOW_MS = 3000;
-  const liveStack = new LiveStacker(LIVE_STACK_WINDOW_MS);
+  // Each mode remembers its own window length (seconds)
+  const stackWindowSec: Record<LiveStackMode, number> = { ...DEFAULT_STACK_WINDOW_SEC };
+  const liveStack = new LiveStacker({ mode: 'lucky', windowMs: stackWindowSec.lucky * 1000 });
   let liveStackEnabled = false;
 
   // FPS tracking
@@ -316,12 +318,20 @@ if (parentPort) {
         fps: measuredFps
       });
 
-      // Live stack: viewport, focus PIP and snapshots show the rolling average of the last 3 s.
-      // Focus score and SER recording always use the live frame.
+      // Live stack: viewport, focus PIP and snapshots show the aligned rolling stack.
+      // Focus score and SER recording always use the live frame; in lucky mode the focus
+      // score is the per-frame quality used to pick the sharpest frames.
       let displayFrame: Buffer = frameBuf;
       let display16 = bitDepth === 16;
       if (liveStackEnabled) {
-        const stacked = liveStack.push(frameBuf, currentRoi.width, currentRoi.height, display16, now);
+        const stacked = liveStack.push(
+          frameBuf,
+          currentRoi.width,
+          currentRoi.height,
+          display16,
+          now,
+          latestFocusScore
+        );
         if (stacked) {
           displayFrame = stacked;
           display16 = false;
@@ -550,9 +560,17 @@ if (parentPort) {
       } else if (msg.type === 'GRAB_SNAPSHOT') {
         snapshotRequested = true;
       } else if (msg.type === 'SET_LIVE_STACK') {
-        liveStackEnabled = Boolean(msg.payload?.enabled);
-        liveStack.reset();
-        log.info(`Live stack ${liveStackEnabled ? 'enabled' : 'disabled'} (${LIVE_STACK_WINDOW_MS} ms window)`);
+        const p = msg.payload ?? {};
+        if (typeof p.enabled === 'boolean') liveStackEnabled = p.enabled;
+        const mode: LiveStackMode = p.mode === 'lucky' || p.mode === 'dso' ? p.mode : liveStack.options.mode;
+        if (Number.isFinite(p.windowSec)) stackWindowSec[mode] = p.windowSec;
+        liveStack.configure({ mode, windowMs: stackWindowSec[mode] * 1000, keepPercent: p.keepPercent });
+        stackWindowSec[mode] = liveStack.options.windowMs / 1000; // clamped
+        const o = liveStack.options;
+        log.info(
+          `Live stack ${liveStackEnabled ? 'enabled' : 'disabled'} (${o.mode}, ${o.windowMs / 1000} s window` +
+            `${o.mode === 'lucky' ? `, best ${o.keepPercent}%` : ''})`
+        );
       } else if (msg.type === 'STOP_RECORDING') {
         if (serWriter) {
           serWriter.close();
@@ -587,8 +605,12 @@ if (parentPort) {
             recordingFile: serWriter ? path.basename(recordingFile) : undefined,
             liveStack: {
               enabled: liveStackEnabled,
+              mode: liveStack.options.mode,
               frames: liveStackEnabled ? liveStack.frameCount : 0,
-              windowSec: LIVE_STACK_WINDOW_MS / 1000
+              pool: liveStackEnabled ? liveStack.poolFrameCount : 0,
+              rejected: liveStackEnabled ? liveStack.rejectedCount : 0,
+              windowSec: liveStack.options.windowMs / 1000,
+              keepPercent: liveStack.options.keepPercent
             },
             mock: mockParams
               ? {

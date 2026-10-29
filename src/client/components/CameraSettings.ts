@@ -1,10 +1,10 @@
 import type { ClientCommand, TelemetryMessage } from '../../common/protocol.js';
 import { DEFAULT_STRETCH, type StretchParams } from './Viewport.js';
 
-// Logarithmic exposure slider: 0.05 ms .. 10 s over 2000 steps.
-// ~0.6% per step everywhere, so the 0.05-5 ms band still gets ~750 fine steps.
+// Logarithmic exposure slider: 0.05 ms .. 30 s over 2000 steps.
+// ~0.7% per step everywhere, so the 0.05-5 ms band still gets ~700 fine steps.
 const EXP_MIN_MS = 0.05;
-const EXP_MAX_MS = 10_000;
+const EXP_MAX_MS = 30_000;
 const EXP_STEPS = 2000;
 
 function sliderToExposureUs(pos: number): number {
@@ -64,6 +64,8 @@ export class CameraSettings {
             <button type="button" class="btn-chip exp-preset" data-exp="2000000">2s</button>
             <button type="button" class="btn-chip exp-preset" data-exp="5000000">5s</button>
             <button type="button" class="btn-chip exp-preset" data-exp="10000000">10s</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="20000000">20s</button>
+            <button type="button" class="btn-chip exp-preset" data-exp="30000000">30s</button>
           </div>
         </div>
 
@@ -117,8 +119,20 @@ export class CameraSettings {
 
         <div class="control-group">
           <div class="control-label-row">
-            <span>Live Stack (3 s rolling average)</span>
+            <span>Live Stack</span>
             <span id="stack-status" class="mono-val">OFF</span>
+          </div>
+          <div class="preset-row">
+            <button type="button" class="btn-chip stack-mode" data-mode="lucky" title="Align on surface detail, keep only the sharpest frames (uses the focus box score)">Lucky (planets/Moon)</button>
+            <button type="button" class="btn-chip stack-mode" data-mode="dso" title="Align on stars (shift + rotation), reject frames that don't match">DSO (stars)</button>
+          </div>
+          <div class="preset-row">
+            <input id="stack-window" type="number" value="3" min="0.5" max="3600" step="0.5" style="width: 70px;" />
+            <span class="unit-label">s window</span>
+            <span id="stack-keep-group">
+              <input id="stack-keep" type="number" value="25" min="1" max="100" step="1" style="width: 60px;" />
+              <span class="unit-label">% best</span>
+            </span>
           </div>
           <div class="preset-row">
             <button type="button" id="btn-live-stack" class="btn-chip">Enable Live Stack</button>
@@ -257,6 +271,25 @@ export class CameraSettings {
       });
     });
 
+    this.container.querySelectorAll<HTMLButtonElement>('.stack-mode').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mode === 'dso' ? 'dso' : 'lucky';
+        this.sendCommand({ action: 'SET_LIVE_STACK', payload: { mode } });
+      });
+    });
+
+    const stackWindow = this.container.querySelector('#stack-window') as HTMLInputElement;
+    stackWindow.addEventListener('change', () => {
+      const windowSec = Number(stackWindow.value);
+      if (windowSec > 0) this.sendCommand({ action: 'SET_LIVE_STACK', payload: { windowSec } });
+    });
+
+    const stackKeep = this.container.querySelector('#stack-keep') as HTMLInputElement;
+    stackKeep.addEventListener('change', () => {
+      const keepPercent = Number(stackKeep.value);
+      if (keepPercent > 0) this.sendCommand({ action: 'SET_LIVE_STACK', payload: { keepPercent } });
+    });
+
     const btnRecStart = this.container.querySelector('#btn-rec-start') as HTMLButtonElement;
     const btnRecStop = this.container.querySelector('#btn-rec-stop') as HTMLButtonElement;
     const recFrames = this.container.querySelector('#rec-frames') as HTMLInputElement;
@@ -279,8 +312,10 @@ export class CameraSettings {
     btnSnapshot.addEventListener('click', () => {
       this.setSnapshotBusy(true);
       this.sendCommand({ action: 'GRAB_SNAPSHOT' });
-      // Fallback in case no frame arrives (e.g. camera stalled or disconnected)
-      setTimeout(() => this.setSnapshotBusy(false), 15000);
+      // Fallback in case no frame arrives (e.g. camera stalled or disconnected);
+      // allow two full exposures so long (20-30 s) exposures aren't cut short
+      const exposureMs = sliderToExposureUs(Number(expSlider.value)) / 1000;
+      setTimeout(() => this.setSnapshotBusy(false), Math.max(15000, 2 * exposureMs + 5000));
     });
   }
 
@@ -310,11 +345,33 @@ export class CameraSettings {
     if (btnLiveStack && stackStatus) {
       const stack = tel.camera.liveStack;
       const enabled = Boolean(stack?.enabled);
+      const mode = stack?.mode ?? 'lucky';
       btnLiveStack.dataset.enabled = String(enabled);
       btnLiveStack.textContent = enabled ? 'Disable Live Stack' : 'Enable Live Stack';
       btnLiveStack.classList.toggle('btn-accent', enabled);
-      stackStatus.textContent = enabled ? `ON (${stack?.frames ?? 0} frames)` : 'OFF';
+      if (!enabled) {
+        stackStatus.textContent = 'OFF';
+      } else if (mode === 'lucky') {
+        stackStatus.textContent = `ON (best ${stack?.frames ?? 0}/${stack?.pool ?? 0})`;
+      } else {
+        const rejected = stack?.rejected ?? 0;
+        stackStatus.textContent = `ON (${stack?.frames ?? 0} frames${rejected ? `, ${rejected} rejected` : ''})`;
+      }
       stackStatus.style.color = enabled ? '#34d399' : '#94a3b8';
+
+      this.container.querySelectorAll<HTMLButtonElement>('.stack-mode').forEach((btn) => {
+        btn.classList.toggle('btn-accent', btn.dataset.mode === mode);
+      });
+      const keepGroup = this.container.querySelector('#stack-keep-group') as HTMLElement | null;
+      if (keepGroup) keepGroup.style.display = mode === 'lucky' ? '' : 'none';
+      const stackWindow = this.container.querySelector('#stack-window') as HTMLInputElement | null;
+      if (stack && stackWindow && document.activeElement !== stackWindow) {
+        stackWindow.value = String(stack.windowSec);
+      }
+      const stackKeep = this.container.querySelector('#stack-keep') as HTMLInputElement | null;
+      if (stack && stackKeep && document.activeElement !== stackKeep) {
+        stackKeep.value = String(stack.keepPercent);
+      }
     }
 
     const roiSelect = this.container.querySelector('#roi-select') as HTMLSelectElement;

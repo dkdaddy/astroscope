@@ -146,7 +146,16 @@ export async function createAstroScopeServer(port = 3000) {
             snapshotRequesters.add(socket);
             worker.postMessage({ type: 'GRAB_SNAPSHOT' });
           } else if (cmd.action === 'SET_LIVE_STACK') {
-            worker.postMessage({ type: 'SET_LIVE_STACK', payload: { enabled: Boolean(cmd.payload?.enabled) } });
+            const p = cmd.payload ?? {};
+            worker.postMessage({
+              type: 'SET_LIVE_STACK',
+              payload: {
+                enabled: typeof p.enabled === 'boolean' ? p.enabled : undefined,
+                mode: p.mode === 'lucky' || p.mode === 'dso' ? p.mode : undefined,
+                windowSec: Number.isFinite(p.windowSec) ? p.windowSec : undefined,
+                keepPercent: Number.isFinite(p.keepPercent) ? p.keepPercent : undefined
+              }
+            });
           } else if (cmd.action === 'MOUNT_JOG') {
             mount.jog(cmd.payload.direction, cmd.payload.speed, cmd.payload.durationMs);
           } else if (cmd.action === 'MOUNT_TRACKING') {

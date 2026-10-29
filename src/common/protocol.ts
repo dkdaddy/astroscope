@@ -90,6 +90,8 @@ export function unpackBinaryFrame(buffer: ArrayBuffer): {
   };
 }
 
+export type LiveStackMode = 'lucky' | 'dso';
+
 export interface FocusROI {
   x: number;
   y: number;
@@ -141,7 +143,10 @@ export type ClientCommand =
   | {
       action: 'SET_LIVE_STACK';
       payload: {
-        enabled: boolean;
+        enabled?: boolean;
+        mode?: LiveStackMode;
+        windowSec?: number;
+        keepPercent?: number;
       };
     }
   | {
@@ -182,8 +187,15 @@ export interface TelemetryMessage {
     recordingFile?: string;
     liveStack?: {
       enabled: boolean;
+      mode: LiveStackMode;
+      /** Frames contributing to the stacked image */
       frames: number;
+      /** Frames in the window (lucky mode keeps the best keepPercent of these) */
+      pool: number;
+      /** Frames that failed alignment (DSO mode) */
+      rejected: number;
       windowSec: number;
+      keepPercent: number;
     };
     mock?: {
       scene: string;
