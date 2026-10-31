@@ -16,6 +16,7 @@ import { MockCameraDriver } from './mock-camera.js';
 import { ZwoKoffiDriver } from './camera-driver.js';
 import { SerWriter } from './ser-writer.js';
 import { DEFAULT_STACK_WINDOW_SEC, LiveStacker } from './live-stack.js';
+import { RoiTracker } from './roi-tracker.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('camera-worker');
@@ -228,6 +229,7 @@ if (parentPort) {
   const stackWindowSec: Record<LiveStackMode, number> = { ...DEFAULT_STACK_WINDOW_SEC };
   const liveStack = new LiveStacker({ mode: 'lucky', windowMs: stackWindowSec.lucky * 1000 });
   let liveStackEnabled = false;
+  const roiTracker = new RoiTracker();
 
   // FPS tracking
   let fpsFrameCount = 0;
@@ -301,7 +303,18 @@ if (parentPort) {
         }
       }
 
-      // 2. Always compute real-time focus score on the active focus ROI at full camera framerate!
+      // 2. Auto-track: re-centre the focus ROI on the brightest object (planet/Moon) when confident
+      const trackedRoi = roiTracker.update(
+        frameBuf,
+        currentRoi.width,
+        currentRoi.height,
+        bitDepth === 16,
+        focusRoi,
+        now
+      );
+      if (trackedRoi) focusRoi = trackedRoi;
+
+      // Always compute real-time focus score on the active focus ROI at full camera framerate!
       latestFocusScore = computeBayerRoiFocusScore(
         frameBuf,
         currentRoi.width,
@@ -493,6 +506,7 @@ if (parentPort) {
     });
 
     liveStack.reset();
+    roiTracker.reset();
     await driver.startCapture(handleFrame);
   };
 
@@ -524,6 +538,7 @@ if (parentPort) {
         }
         if (p.roi) {
           currentRoi = await driver.setROI(p.roi);
+          roiTracker.reset();
           // Re-center focus ROI inside new sensor ROI if needed
           focusRoi = {
             x: Math.max(0, Math.min(currentRoi.width - focusRoi.width, Math.floor((currentRoi.width - focusRoi.width) / 4) * 2)),
@@ -539,6 +554,9 @@ if (parentPort) {
         const x = Math.max(0, Math.min(currentRoi.width - w, Math.floor(r.x / 2) * 2));
         const y = Math.max(0, Math.min(currentRoi.height - h, Math.floor(r.y / 2) * 2));
         focusRoi = { x, y, width: w, height: h };
+      } else if (msg.type === 'SET_ROI_TRACKING') {
+        roiTracker.configure(msg.payload ?? {});
+        log.info(`ROI tracking ${roiTracker.enabled ? 'enabled' : 'disabled'} (tolerance ${roiTracker.tolerancePx} px)`);
       } else if (msg.type === 'SET_MOCK_PARAMS' && driver.setMockParams) {
         driver.setMockParams(msg.payload as Partial<MockCameraParams>);
       } else if (msg.type === 'START_RECORDING') {
@@ -600,6 +618,11 @@ if (parentPort) {
             roi: currentRoi,
             focusRoi,
             focusScore: latestFocusScore,
+            roiTracking: {
+              enabled: roiTracker.enabled,
+              tolerancePx: roiTracker.tolerancePx,
+              status: roiTracker.status
+            },
             isRecording: serWriter !== null,
             recordedFrames: serWriter ? serWriter.getRecordedFrames() : 0,
             recordingFile: serWriter ? path.basename(recordingFile) : undefined,

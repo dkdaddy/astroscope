@@ -92,6 +92,9 @@ export function unpackBinaryFrame(buffer: ArrayBuffer): {
 
 export type LiveStackMode = 'lucky' | 'dso';
 
+/** off = disabled, searching = no confident bright object, tracking = ROI locked on object */
+export type RoiTrackingStatus = 'off' | 'searching' | 'tracking';
+
 export interface FocusROI {
   x: number;
   y: number;
@@ -115,6 +118,14 @@ export type ClientCommand =
   | {
       action: 'SET_FOCUS_ROI';
       payload: FocusROI;
+    }
+  | {
+      action: 'SET_ROI_TRACKING';
+      payload: {
+        enabled?: boolean;
+        /** Object must be off-centre by more than this many sensor pixels before the ROI moves */
+        tolerancePx?: number;
+      };
     }
   | {
       action: 'SET_MOCK_PARAMS';
@@ -182,6 +193,11 @@ export interface TelemetryMessage {
     roi: CameraROI;
     focusRoi: FocusROI;
     focusScore: number;
+    roiTracking?: {
+      enabled: boolean;
+      tolerancePx: number;
+      status: RoiTrackingStatus;
+    };
     isRecording: boolean;
     recordedFrames: number;
     recordingFile?: string;

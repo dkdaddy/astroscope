@@ -119,6 +119,18 @@ export class CameraSettings {
 
         <div class="control-group">
           <div class="control-label-row">
+            <span>Auto-Track Object (Focus ROI)</span>
+            <span id="track-status" class="mono-val">OFF</span>
+          </div>
+          <div class="preset-row">
+            <input id="track-tolerance" type="number" value="32" min="4" max="1000" step="4" style="width: 70px;" title="Object must be off-centre by more than this many sensor pixels before the ROI moves" />
+            <span class="unit-label">px tolerance</span>
+            <button type="button" id="btn-roi-track" class="btn-chip" title="Keep the focus ROI centred on the brightest object against a black sky">Enable Tracking</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <div class="control-label-row">
             <span>Live Stack</span>
             <span id="stack-status" class="mono-val">OFF</span>
           </div>
@@ -263,6 +275,20 @@ export class CameraSettings {
       applyStretch();
     });
 
+    const btnRoiTrack = this.container.querySelector('#btn-roi-track') as HTMLButtonElement;
+    btnRoiTrack.addEventListener('click', () => {
+      this.sendCommand({
+        action: 'SET_ROI_TRACKING',
+        payload: { enabled: btnRoiTrack.dataset.enabled !== 'true' }
+      });
+    });
+
+    const trackTolerance = this.container.querySelector('#track-tolerance') as HTMLInputElement;
+    trackTolerance.addEventListener('change', () => {
+      const tolerancePx = Number(trackTolerance.value);
+      if (tolerancePx > 0) this.sendCommand({ action: 'SET_ROI_TRACKING', payload: { tolerancePx } });
+    });
+
     const btnLiveStack = this.container.querySelector('#btn-live-stack') as HTMLButtonElement;
     btnLiveStack.addEventListener('click', () => {
       this.sendCommand({
@@ -339,6 +365,23 @@ export class CameraSettings {
     }
 
     const recStatus = this.container.querySelector('#rec-status') as HTMLElement;
+
+    const btnRoiTrack = this.container.querySelector('#btn-roi-track') as HTMLButtonElement | null;
+    const trackStatus = this.container.querySelector('#track-status') as HTMLElement | null;
+    const tracking = tel.camera.roiTracking;
+    if (btnRoiTrack && trackStatus && tracking) {
+      btnRoiTrack.dataset.enabled = String(tracking.enabled);
+      btnRoiTrack.textContent = tracking.enabled ? 'Disable Tracking' : 'Enable Tracking';
+      btnRoiTrack.classList.toggle('btn-accent', tracking.enabled);
+      trackStatus.textContent =
+        tracking.status === 'tracking' ? 'LOCKED' : tracking.status === 'searching' ? 'SEARCHING' : 'OFF';
+      trackStatus.style.color =
+        tracking.status === 'tracking' ? '#34d399' : tracking.status === 'searching' ? '#f59e0b' : '#94a3b8';
+      const trackTolerance = this.container.querySelector('#track-tolerance') as HTMLInputElement | null;
+      if (trackTolerance && document.activeElement !== trackTolerance) {
+        trackTolerance.value = String(tracking.tolerancePx);
+      }
+    }
 
     const btnLiveStack = this.container.querySelector('#btn-live-stack') as HTMLButtonElement | null;
     const stackStatus = this.container.querySelector('#stack-status') as HTMLElement | null;

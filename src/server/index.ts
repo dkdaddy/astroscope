@@ -133,6 +133,15 @@ export async function createAstroScopeServer(port = 3000) {
             worker.postMessage({ type: 'SET_CONFIG', payload: cmd.payload });
           } else if (cmd.action === 'SET_FOCUS_ROI') {
             worker.postMessage({ type: 'SET_FOCUS_ROI', payload: cmd.payload });
+          } else if (cmd.action === 'SET_ROI_TRACKING') {
+            const p = cmd.payload ?? {};
+            worker.postMessage({
+              type: 'SET_ROI_TRACKING',
+              payload: {
+                enabled: typeof p.enabled === 'boolean' ? p.enabled : undefined,
+                tolerancePx: Number.isFinite(p.tolerancePx) ? p.tolerancePx : undefined
+              }
+            });
           } else if (cmd.action === 'SET_MOCK_PARAMS') {
             worker.postMessage({ type: 'SET_MOCK_PARAMS', payload: cmd.payload });
           } else if (cmd.action === 'SET_CAMERA_MODE') {

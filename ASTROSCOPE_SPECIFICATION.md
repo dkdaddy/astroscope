@@ -274,6 +274,18 @@ Binary preview frames are prepended with a fixed 24-byte Little-Endian binary he
     }
   }
   ```
+* **Client $\to$ Server: Auto-Track Focus ROI on Brightest Object (planet/Moon on black sky)**
+
+  The worker finds the brightest extended object (block-averaged luminance, 50%-contrast centroid) a few times per second. The focus ROI is only re-centred when the detection is confident (contrast ≥ 12 levels and ≥ 8σ above the median background, object < 40% of frame), the object is more than `tolerancePx` off-centre, and two consecutive detections agree.
+  ```json
+  {
+    "action": "SET_ROI_TRACKING",
+    "payload": {
+      "enabled": true,
+      "tolerancePx": 32
+    }
+  }
+  ```
 * **Client $\to$ Server: Set Mock Simulator Controls (Active in Mock Mode)**
   ```json
   {
