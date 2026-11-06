@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arduino Nano Live Voltage Monitor</title>
+    <!-- Chart.js for smooth streaming graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f6f9;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 15px;
+        }
+        h1 { margin: 0; font-size: 24px; color: #1a1a1a; }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .buttons { display: flex; gap: 10px; }
+        button.disconnect:not(:disabled) { background-color: #dc3545; }
+        button.disconnect:not(:disabled):hover { background-color: #a71d2a; }
+        .dashboard {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .card {
+            flex: 1;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+            text-align: center;
+        }
+        .card-label { font-size: 12px; text-transform: uppercase; color: #6c757d; font-weight: bold; }
+        .card-value { font-size: 28px; font-weight: bold; margin-top: 5px; color: #007bff; }
+        .chart-container {
+            position: relative;
+            height: 350px;
+            width: 100%;
+        }
+        #status { font-size: 14px; color: #6c757d; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <div>
+            <h1>Arduino Live Monitor</h1>
+            <div id="status">Status: Disconnected</div>
+        </div>
+        <div class="buttons">
+            <button id="connectBtn">Connect Nano</button>
+            <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
+        </div>
+    </header>
+
+    <div class="dashboard">
+        <div class="card">
+            <div class="card-label">Live Voltage</div>
+            <div class="card-value" id="voltageVal">0.00 V</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Raw Analog Input (A7)</div>
+            <div class="card-value" id="rawVal">0</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="voltageChart"></canvas>
+    </div>
+</div>
+
+<script>
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const statusDiv = document.getElementById('status');
+    const voltageVal = document.getElementById('voltageVal');
+    const rawVal = document.getElementById('rawVal');
+
+    let port;
+    let reader;
+    let inputDone;
+    let inputBuffer = '';
+
+    // Initialize Chart.js
+    const ctx = document.getElementById('voltageChart').getContext('2d');
+    const maxDataPoints = 50; // Controls how many points stay on screen
+    
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: Array(maxDataPoints).fill(''),
+            datasets: [{
+                label: 'Voltage (V)',
+                data: Array(maxDataPoints).fill(0),
+                borderColor: '#007bff',
+                backgroundColor: 'rgba(0, 123, 255, 0.05)',
+                borderWidth: 2,
+                pointRadius: 0, // Keeps the line clean
+                tension: 0.3    // Smooths the line curves
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    min: 0,
+                    max: 5,
+                    title: { display: true, text: 'Voltage (V)' }
+                },
+                x: {
+                    grid: { display: false }
+                }
+            },
+            plugins: {
+                legend: { display: false }
+            }
+        }
+    });
+
+    // Helper to update graph dynamically
+    function updateChart(newVoltage) {
+        chart.data.datasets[0].data.push(newVoltage);
+        chart.data.datasets[0].data.shift();
+        chart.update('none'); // Update smoothly without heavy animations
+    }
+
+    // Connect to Serial Port via Browser
+    connectBtn.addEventListener('click', async () => {
+        if ('serial' in navigator) {
+            try {
+                // Prompt user to select Arduino's serial port
+                port = await navigator.serial.requestPort();
+                // Match the 9600 baud rate from your Arduino sketch
+                await port.open({ baudRate: 9600 });
+                
+                statusDiv.innerText = "Status: Connected";
+                statusDiv.style.color = "#28a745";
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+
+                // Set up stream reader
+                const decoder = new TextDecoderStream();
+                inputDone = port.readable.pipeTo(decoder.writable);
+                reader = decoder.readable.getReader();
+
+                // Start listening loop
+                readLoop();
+
+            } catch (err) {
+                statusDiv.innerText = `Error: ${err.message}`;
+                statusDiv.style.color = "#dc3545";
+            }
+        } else {
+            alert('Web Serial API is not supported in this browser. Please try Google Chrome or Edge.');
+        }
+    });
+
+    // Closes the serial port and resets the UI. Also runs if the device is unplugged.
+    async function disconnect() {
+        if (!port) return;
+        const currentPort = port;
+        port = null; // Prevents re-entry from readLoop
+        disconnectBtn.disabled = true;
+
+        try {
+            await reader.cancel(); // Ends readLoop
+        } catch (err) {
+            // Reader was already released (e.g. device unplugged), nothing to cancel
+        }
+        await inputDone?.catch(() => {});
+
+        try {
+            await currentPort.close();
+        } catch (err) {
+            console.error("Close error:", err);
+        }
+
+        reader = null;
+        inputDone = null;
+        inputBuffer = '';
+        statusDiv.innerText = "Status: Disconnected";
+        statusDiv.style.color = "#6c757d";
+        connectBtn.disabled = false;
+    }
+
+    disconnectBtn.addEventListener('click', disconnect);
+
+    // Continuous reading loop
+    async function readLoop() {
+        const activeReader = reader;
+        while (true) {
+            const { value, done } = await activeReader.read();
+            if (done) {
+                activeReader.releaseLock();
+                disconnect();
+                break;
+            }
+            if (value) {
+                inputBuffer += value;
+                // Split buffer by new lines printed from Arduino (Serial.println)
+                const lines = inputBuffer.split('\r\n');
+                
+                // Keep the incomplete last fragment in the buffer
+                inputBuffer = lines.pop(); 
+
+                for (const line of lines) {
+                    parseArduinoData(line);
+                }
+            }
+        }
+    }
+
+    // Parser matching your Arduino's serial format: "Raw Value: X \t Voltage: Y V"
+    function parseArduinoData(line) {
+        try {
+            if (line.includes("Raw Value:") && line.includes("Voltage:")) {
+                // Extract Raw Value
+                const rawMatch = line.match(/Raw Value:\s*(\d+)/);
+                // Extract Voltage Value
+                const voltMatch = line.match(/Voltage:\s*([\d.]+)/);
+
+                if (rawMatch && voltMatch) {
+                    const raw = parseInt(rawMatch[1], 10);
+                    const voltage = parseFloat(voltMatch[1]);
+
+                    // UI elements update
+                    rawVal.innerText = raw;
+                    voltageVal.innerText = voltage.toFixed(2) + " V";
+                    
+                    // Graph update
+                    updateChart(voltage);
+                }
+            }
+        } catch (e) {
+            console.error("Parsing error:", e);
+        }
+    }
+</script>
+
+</body>
+</html>
