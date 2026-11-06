@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rotary Encoder Radio Tuner</title>
+<style>
+  :root {
+    --wood-dark: #3b2414;
+    --wood: #6b4226;
+    --glass: #1d1a12;
+    --glow: #ffcf7a;
+    --brass: #c9a45c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: radial-gradient(circle at 50% 30%, #2b2b30, #0e0e10);
+    color: #ddd;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px;
+  }
+  .toolbar {
+    width: 1000px;
+    max-width: 100%;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .toolbar h1 { font-size: 20px; margin: 0 auto 0 0; color: #f0e2c0; letter-spacing: 1px; }
+  button {
+    background: #3a3a42; color: #eee; border: 1px solid #555; border-radius: 6px;
+    padding: 8px 14px; font-size: 14px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #4a4a55; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  label { font-size: 13px; color: #bbb; }
+  input[type=number] {
+    width: 64px; background: #222; color: #eee; border: 1px solid #555;
+    border-radius: 4px; padding: 4px 6px;
+  }
+  .status { font-size: 13px; padding: 4px 10px; border-radius: 12px; background: #442; }
+  .status.connected { background: #1f4d2a; }
+
+  /* Radio cabinet */
+  .radio {
+    width: 1000px;
+    max-width: 100%;
+    padding: 28px;
+    border-radius: 22px;
+    background:
+      repeating-linear-gradient(92deg, rgba(0,0,0,0.08) 0 3px, rgba(255,255,255,0.03) 3px 9px),
+      linear-gradient(180deg, var(--wood), var(--wood-dark));
+    box-shadow: 0 20px 50px rgba(0,0,0,0.7), inset 0 2px 0 rgba(255,255,255,0.15);
+  }
+  .panel {
+    background: linear-gradient(180deg, #d8c9a8, #b5a582);
+    border-radius: 12px;
+    padding: 22px;
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.5);
+  }
+  .dial-window {
+    background: var(--glass);
+    border-radius: 10px;
+    border: 6px solid var(--brass);
+    box-shadow: inset 0 0 40px rgba(255,190,90,0.35), 0 3px 6px rgba(0,0,0,0.5);
+    overflow: hidden;
+  }
+  .dial-window svg { display: block; width: 100%; height: auto; }
+  .controls {
+    display: grid;
+    grid-template-columns: 220px 1fr 260px;
+    gap: 22px;
+    align-items: center;
+    margin-top: 22px;
+  }
+  .meter-box, .readout-box {
+    background: #1e1b14;
+    border-radius: 10px;
+    border: 4px solid var(--brass);
+    padding: 10px;
+    box-shadow: inset 0 0 20px rgba(255,190,90,0.25);
+  }
+  .readout {
+    font-family: "Consolas", "Courier New", monospace;
+    color: var(--glow);
+    text-shadow: 0 0 8px rgba(255,180,60,0.8);
+    text-align: center;
+  }
+  .readout .freq { font-size: 40px; letter-spacing: 2px; }
+  .readout .station { font-size: 16px; min-height: 22px; margin-top: 4px; }
+  .lamps { display: flex; justify-content: center; gap: 18px; margin-top: 10px; font-size: 12px; color: #9a8a6a; }
+  .lamp { display: flex; align-items: center; gap: 6px; }
+  .lamp i {
+    width: 12px; height: 12px; border-radius: 50%; background: #3a2a1a;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.6);
+  }
+  .lamp.on i { background: #ff5a3a; box-shadow: 0 0 10px #ff5a3a; }
+  .lamp.band.on i { background: #7aff8a; box-shadow: 0 0 10px #7aff8a; }
+  .knobs { display: flex; align-items: center; justify-content: center; gap: 18px; }
+  .knob-wrap { text-align: center; color: #3b2a14; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
+  .knob-wrap svg { cursor: ns-resize; touch-action: none; }
+  .ratio-arrow { color: #3b2a14; font-weight: 700; font-size: 14px; text-align: center; }
+
+  .info {
+    width: 1000px; max-width: 100%;
+    margin-top: 18px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .info div {
+    background: #1b1b20; border: 1px solid #333; border-radius: 8px;
+    padding: 10px; font-size: 13px; color: #999;
+  }
+  .info b { display: block; font-size: 18px; color: #eee; font-family: Consolas, monospace; margin-top: 4px; }
+  .log {
+    width: 1000px; max-width: 100%; margin-top: 12px; height: 110px; overflow-y: auto;
+    background: #111; border: 1px solid #333; border-radius: 8px; padding: 8px;
+    font-family: Consolas, monospace; font-size: 12px; color: #8c8;
+  }
+  .hint { width: 1000px; max-width: 100%; font-size: 12px; color: #777; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>📻 Encoder Radio Tuner</h1>
+  <label>Encoder detents/rev <input id="stepsPerRev" type="number" min="1" value="20"></label>
+  <label>Ratio <input id="ratio" type="number" min="1" step="1" value="10"> : 1</label>
+  <button id="soundBtn">🔇 Sound off</button>
+  <button id="connectBtn">Connect</button>
+  <button id="disconnectBtn" disabled>Disconnect</button>
+  <span id="status" class="status">Disconnected</span>
+</div>
+
+<div class="radio">
+  <div class="panel">
+    <div class="dial-window">
+      <svg id="dial" viewBox="0 0 940 210" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+
+    <div class="controls">
+      <div class="meter-box">
+        <svg id="meter" viewBox="0 0 200 120" width="100%"></svg>
+      </div>
+
+      <div class="knobs">
+        <div class="knob-wrap">
+          <svg id="encoderKnob" width="90" height="90" viewBox="-50 -50 100 100"></svg>
+          <div>ENCODER</div>
+        </div>
+        <div class="ratio-arrow" id="ratioLabel">10 : 1<br>➜</div>
+        <div class="knob-wrap">
+          <svg id="tuningKnob" width="190" height="190" viewBox="-100 -100 200 200"></svg>
+          <div>TUNING</div>
+        </div>
+      </div>
+
+      <div class="readout-box">
+        <div class="readout">
+          <div class="freq" id="freq">--</div>
+          <div class="station" id="station"></div>
+        </div>
+        <div class="lamps">
+          <span class="lamp band" id="lampFM"><i></i>FM</span>
+          <span class="lamp band" id="lampAM"><i></i>AM</span>
+          <span class="lamp" id="lampTuned"><i></i>TUNED</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="info">
+  <div>Encoder position<b id="infoPos">0</b></div>
+  <div>Encoder angle<b id="infoEncDeg">0.0°</b></div>
+  <div>Tuning knob angle<b id="infoKnobDeg">0.0°</b></div>
+  <div>Signal<b id="infoSignal">0%</b></div>
+</div>
+<div class="log" id="log"></div>
+<div class="hint">
+  Requires Chrome/Edge (Web Serial) at 115200 baud. Without hardware: mouse wheel or drag on a knob,
+  ←/→ arrow keys to step the encoder, Space to press the encoder button (toggles FM/AM).
+</div>
+
+<script>
+(() => {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const BAUD = 115200;
+  const KNOB_TURNS_FULL_SCALE = 2;          // tuning-knob turns to sweep the whole dial
+  const MAX_KNOB_DEG = KNOB_TURNS_FULL_SCALE * 360;
+
+  const BANDS = {
+    FM: { min: 88, max: 108, unit: 'MHz', decimals: 2, width: 0.12,
+          stations: [
+            [88.9, 'Jazz 88.9'], [91.5, 'Public Radio'], [94.7, 'Classic Rock'],
+            [97.3, 'Hits 97'], [99.9, 'Country 99.9'], [101.1, 'Talk 101'],
+            [103.5, 'Dance 103'], [106.7, 'Oldies 106.7'] ] },
+    AM: { min: 530, max: 1700, unit: 'kHz', decimals: 0, width: 7,
+          stations: [
+            [570, 'News 570'], [710, 'Sports 710'], [880, 'Talk 880'],
+            [1010, 'All News 1010'], [1250, 'Gospel 1250'], [1500, 'Weather 1500'] ] }
+  };
+
+  const state = {
+    band: 'FM',
+    knobDeg: MAX_KNOB_DEG * 0.3,
+    encDeg: 0,
+    encPos: 0,
+    lastSerialPos: null,
+    signal: 0
+  };
+
+  const $ = id => document.getElementById(id);
+  const el = (tag, attrs = {}, parent) => {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (parent) parent.appendChild(n);
+    return n;
+  };
+
+  const stepsPerRev = () => Math.max(1, Number($('stepsPerRev').value) || 20);
+  const ratio = () => Math.max(1, Number($('ratio').value) || 10);
+
+  // ---------- Dial ----------
+  const DIAL_X0 = 50, DIAL_X1 = 890;
+  const dialX = frac => DIAL_X0 + frac * (DIAL_X1 - DIAL_X0);
+  const dial = $('dial');
+  let pointer;
+
+  function buildDial() {
+    dial.innerHTML = '';
+    const defs = el('defs', {}, dial);
+    const glow = el('filter', { id: 'glow' }, defs);
+    el('feGaussianBlur', { stdDeviation: 2.5, result: 'b' }, glow);
+    const merge = el('feMerge', {}, glow);
+    el('feMergeNode', { in: 'b' }, merge);
+    el('feMergeNode', { in: 'SourceGraphic' }, merge);
+
+    const textAttrs = { fill: '#ffcf7a', 'font-family': 'Georgia, serif', 'text-anchor': 'middle', filter: 'url(#glow)' };
+
+    // FM scale (top)
+    const fm = BANDS.FM;
+    el('text', { ...textAttrs, x: 22, y: 50, 'font-size': 14 }, dial).textContent = 'FM';
+    el('line', { x1: DIAL_X0, y1: 70, x2: DIAL_X1, y2: 70, stroke: '#c9a45c', 'stroke-width': 1 }, dial);
+    for (let f = fm.min; f <= fm.max + 1e-9; f += 0.5) {
+      const x = dialX((f - fm.min) / (fm.max - fm.min));
+      const major = Math.abs(f - Math.round(f)) < 1e-6 && Math.round(f) % 2 === 0;
+      const whole = Math.abs(f - Math.round(f)) < 1e-6;
+      el('line', { x1: x, y1: 70, x2: x, y2: 70 - (major ? 16 : whole ? 10 : 5),
+                   stroke: '#e8c27a', 'stroke-width': major ? 2 : 1 }, dial);
+      if (major) el('text', { ...textAttrs, x, y: 46, 'font-size': 16 }, dial).textContent = Math.round(f);
+    }
+
+    // AM scale (bottom)
+    const am = BANDS.AM;
+    el('text', { ...textAttrs, x: 22, y: 172, 'font-size': 14 }, dial).textContent = 'AM';
+    el('line', { x1: DIAL_X0, y1: 140, x2: DIAL_X1, y2: 140, stroke: '#c9a45c', 'stroke-width': 1 }, dial);
+    for (let f = 550; f <= am.max; f += 50) {
+      const x = dialX((f - am.min) / (am.max - am.min));
+      const major = f % 200 === 0;
+      el('line', { x1: x, y1: 140, x2: x, y2: 140 + (major ? 16 : 7),
+                   stroke: '#e8c27a', 'stroke-width': major ? 2 : 1 }, dial);
+      if (major) el('text', { ...textAttrs, x, y: 176, 'font-size': 16 }, dial).textContent = f / 10;
+    }
+    el('text', { ...textAttrs, x: DIAL_X1 + 25, y: 172, 'font-size': 11 }, dial).textContent = 'x10';
+
+    // Station markers
+    for (const [name, band] of Object.entries(BANDS)) {
+      for (const [f] of band.stations) {
+        const x = dialX((f - band.min) / (band.max - band.min));
+        el('circle', { cx: x, cy: name === 'FM' ? 80 : 130, r: 2.5, fill: '#ffa040', opacity: 0.7 }, dial);
+      }
+    }
+
+    el('text', { ...textAttrs, x: 470, y: 108, 'font-size': 13, 'letter-spacing': 6, opacity: 0.55 }, dial)
+      .textContent = 'ASTROSCOPE  •  HIGH FIDELITY';
+
+    pointer = el('g', {}, dial);
+    el('rect', { x: -3, y: 8, width: 6, height: 194, fill: '#ff3b1f', opacity: 0.25 }, pointer);
+    el('line', { x1: 0, y1: 8, x2: 0, y2: 202, stroke: '#ff3b1f', 'stroke-width': 2.5, filter: 'url(#glow)' }, pointer);
+  }
+
+  // ---------- Knobs ----------
+  let tuningRotor, encoderRotor;
+
+  function buildKnob(svg, r, ridges, color) {
+    svg.innerHTML = '';
+    const id = svg.id + 'Grad';
+    const defs = el('defs', {}, svg);
+    const grad = el('radialGradient', { id, cx: '35%', cy: '30%', r: '75%' }, defs);
+    el('stop', { offset: '0%', 'stop-color': color[0] }, grad);
+    el('stop', { offset: '100%', 'stop-color': color[1] }, grad);
+
+    el('circle', { cx: 3, cy: 5, r: r + 2, fill: 'rgba(0,0,0,0.45)' }, svg);
+    const rotor = el('g', {}, svg);
+    for (let i = 0; i < ridges; i++) {
+      const a = (i / ridges) * 360;
+      el('rect', { x: -r * 0.05, y: -r - 1, width: r * 0.1, height: r * 0.14, rx: 1.5,
+                   fill: color[1], transform: `rotate(${a})` }, rotor);
+    }
+    el('circle', { r: r * 0.92, fill: `url(#${id})`, stroke: '#111', 'stroke-width': 1 }, rotor);
+    el('circle', { r: r * 0.7, fill: 'none', stroke: 'rgba(255,255,255,0.12)', 'stroke-width': 2 }, rotor);
+    el('line', { x1: 0, y1: -r * 0.85, x2: 0, y2: -r * 0.45, stroke: '#f4e3b5', 'stroke-width': r * 0.08,
+                 'stroke-linecap': 'round' }, rotor);
+    return rotor;
+  }
+
+  // ---------- Meter ----------
+  let meterNeedle;
+  function buildMeter() {
+    const m = $('meter');
+    m.innerHTML = '';
+    el('rect', { x: 0, y: 0, width: 200, height: 120, rx: 6, fill: '#f3e6c4' }, m);
+    const cx = 100, cy = 110, r = 85;
+    for (let i = 0; i <= 10; i++) {
+      const a = (-50 + i * 10) * Math.PI / 180;
+      const x1 = cx + Math.sin(a) * r, y1 = cy - Math.cos(a) * r;
+      const len = i % 5 === 0 ? 12 : 7;
+      const x2 = cx + Math.sin(a) * (r - len), y2 = cy - Math.cos(a) * (r - len);
+      el('line', { x1, y1, x2, y2, stroke: i >= 8 ? '#c0392b' : '#333', 'stroke-width': i % 5 === 0 ? 2 : 1 }, m);
+    }
+    el('text', { x: 100, y: 70, 'text-anchor': 'middle', 'font-size': 12, fill: '#555',
+                 'font-family': 'Georgia, serif' }, m).textContent = 'SIGNAL';
+    meterNeedle = el('line', { x1: cx, y1: cy, x2: cx, y2: cy - r + 4, stroke: '#111', 'stroke-width': 2 }, m);
+    el('circle', { cx, cy, r: 6, fill: '#333' }, m);
+  }
+
+  // ---------- Tuning model ----------
+  function frequency() {
+    const b = BANDS[state.band];
+    return b.min + (state.knobDeg / MAX_KNOB_DEG) * (b.max - b.min);
+  }
+
+  function signalAt(freq) {
+    const b = BANDS[state.band];
+    let best = 0, name = '';
+    for (const [f, n] of b.stations) {
+      const s = Math.exp(-Math.pow((freq - f) / b.width, 2));
+      if (s > best) { best = s; name = n; }
+    }
+    return { strength: best, name };
+  }
+
+  // One encoder detent = 360/stepsPerRev degrees of encoder; the tuning knob turns 1/ratio of that.
+  function stepEncoder(delta) {
+    if (!delta) return;
+    const encStepDeg = 360 / stepsPerRev();
+    state.encPos += delta;
+    state.encDeg += delta * encStepDeg;
+    state.knobDeg = Math.min(MAX_KNOB_DEG, Math.max(0, state.knobDeg + (delta * encStepDeg) / ratio()));
+    render();
+  }
+
+  function toggleBand() {
+    state.band = state.band === 'FM' ? 'AM' : 'FM';
+    log(`Band -> ${state.band}`);
+    render();
+  }
+
+  // ---------- Render ----------
+  let meterValue = 0;
+  function render() {
+    const b = BANDS[state.band];
+    const freq = frequency();
+    const { strength, name } = signalAt(freq);
+    state.signal = strength;
+
+    pointer.setAttribute('transform', `translate(${dialX(state.knobDeg / MAX_KNOB_DEG)},0)`);
+    tuningRotor.setAttribute('transform', `rotate(${state.knobDeg})`);
+    encoderRotor.setAttribute('transform', `rotate(${state.encDeg})`);
+
+    $('freq').textContent = `${freq.toFixed(b.decimals)} ${b.unit}`;
+    $('station').textContent = strength > 0.5 ? name : (strength > 0.15 ? '~ ~ ~' : '');
+    $('lampFM').classList.toggle('on', state.band === 'FM');
+    $('lampAM').classList.toggle('on', state.band === 'AM');
+    $('lampTuned').classList.toggle('on', strength > 0.85);
+
+    $('infoPos').textContent = state.encPos;
+    $('infoEncDeg').textContent = `${state.encDeg.toFixed(1)}°`;
+    $('infoKnobDeg').textContent = `${state.knobDeg.toFixed(1)}°  (${(state.knobDeg / 360).toFixed(2)} turns)`;
+    $('infoSignal').textContent = `${Math.round(strength * 100)}%`;
+    $('ratioLabel').innerHTML = `${ratio()} : 1<br>➜`;
+
+    updateAudio();
+  }
+
+  // Meter needle has some inertia, like a real moving-coil meter.
+  function animateMeter() {
+    meterValue += (state.signal - meterValue) * 0.15;
+    const angle = -50 + meterValue * 100;
+    meterNeedle.setAttribute('transform', `rotate(${angle} 100 110)`);
+    requestAnimationFrame(animateMeter);
+  }
+
+  // ---------- Audio (static + carrier tone) ----------
+  let audio = null;
+  function startAudio() {
+    const ctx = new AudioContext();
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    const noise = ctx.createBufferSource();
+    noise.buffer = buf; noise.loop = true;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass'; filter.frequency.value = 2500; filter.Q.value = 0.6;
+    const noiseGain = ctx.createGain();
+    noise.connect(filter).connect(noiseGain).connect(ctx.destination);
+    noise.start();
+
+    const toneGain = ctx.createGain();
+    toneGain.connect(ctx.destination);
+    const oscs = [220, 277.18, 329.63].map(f => {
+      const o = ctx.createOscillator();
+      o.type = 'triangle'; o.frequency.value = f;
+      o.connect(toneGain); o.start();
+      return o;
+    });
+    audio = { ctx, noiseGain, toneGain, oscs };
+    updateAudio();
+  }
+  function stopAudio() {
+    if (audio) { audio.ctx.close(); audio = null; }
+  }
+  function updateAudio() {
+    if (!audio) return;
+    const t = audio.ctx.currentTime;
+    audio.noiseGain.gain.setTargetAtTime(0.18 * (1 - state.signal), t, 0.03);
+    audio.toneGain.gain.setTargetAtTime(0.05 * state.signal, t, 0.03);
+  }
+  $('soundBtn').onclick = () => {
+    if (audio) { stopAudio(); $('soundBtn').textContent = '🔇 Sound off'; }
+    else { startAudio(); $('soundBtn').textContent = '🔊 Sound on'; }
+  };
+
+  // ---------- Serial ----------
+  let port = null, reader = null, pipeDone = null, keepReading = false;
+
+  function log(msg) {
+    const l = $('log');
+    const line = document.createElement('div');
+    line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+    l.appendChild(line);
+    while (l.childNodes.length > 200) l.removeChild(l.firstChild);
+    l.scrollTop = l.scrollHeight;
+  }
+
+  function setStatus(connected, text) {
+    $('status').textContent = text;
+    $('status').classList.toggle('connected', connected);
+    $('connectBtn').disabled = connected;
+    $('disconnectBtn').disabled = !connected;
+  }
+
+  function handleLine(line) {
+    if (!line) return;
+    log(line);
+    let m;
+    if (line === 'READY') {
+      // Arduino reset: its counter restarts at 0, so re-sync rather than jump.
+      state.lastSerialPos = null;
+    } else if ((m = line.match(/^POS:(-?\d+)$/))) {
+      const pos = parseInt(m[1], 10);
+      if (state.lastSerialPos !== null) stepEncoder(pos - state.lastSerialPos);
+      state.lastSerialPos = pos;
+    } else if (line === 'BTN:1') {
+      toggleBand();
+    }
+  }
+
+  async function connect() {
+    if (!('serial' in navigator)) {
+      alert('Web Serial is not supported in this browser. Use Chrome or Edge.');
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: BAUD });
+    } catch (e) {
+      log(`Connect failed: ${e.message}`);
+      port = null;
+      return;
+    }
+    setStatus(true, 'Connected');
+    state.lastSerialPos = null;
+    keepReading = true;
+    readLoop();
+  }
+
+  async function readLoop() {
+    const decoder = new TextDecoderStream();
+    pipeDone = port.readable.pipeTo(decoder.writable).catch(() => {});
+    reader = decoder.readable.getReader();
+    let buffer = '';
+    try {
+      while (keepReading) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        let i;
+        while ((i = buffer.indexOf('\n')) >= 0) {
+          handleLine(buffer.slice(0, i).trim());
+          buffer = buffer.slice(i + 1);
+        }
+      }
+    } catch (e) {
+      log(`Read error: ${e.message}`);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async function disconnect() {
+    keepReading = false;
+    try {
+      if (reader) await reader.cancel();
+      if (pipeDone) await pipeDone;
+      if (port) await port.close();
+    } catch (e) {
+      log(`Disconnect error: ${e.message}`);
+    }
+    port = reader = pipeDone = null;
+    setStatus(false, 'Disconnected');
+  }
+
+  $('connectBtn').onclick = connect;
+  $('disconnectBtn').onclick = disconnect;
+  if ('serial' in navigator) {
+    navigator.serial.addEventListener('disconnect', e => {
+      if (e.target === port) { log('Device unplugged'); disconnect(); }
+    });
+  }
+
+  // ---------- Simulation input (no hardware) ----------
+  function attachKnobInput(svg, stepsPerPixelFn) {
+    svg.addEventListener('wheel', e => {
+      e.preventDefault();
+      stepEncoder(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+    let dragY = null, acc = 0;
+    svg.addEventListener('pointerdown', e => { dragY = e.clientY; acc = 0; svg.setPointerCapture(e.pointerId); });
+    svg.addEventListener('pointerup', () => { dragY = null; });
+    svg.addEventListener('pointermove', e => {
+      if (dragY === null) return;
+      acc += (dragY - e.clientY) * stepsPerPixelFn();
+      dragY = e.clientY;
+      const steps = Math.trunc(acc);
+      if (steps) { acc -= steps; stepEncoder(steps); }
+    });
+  }
+  attachKnobInput($('encoderKnob'), () => 0.25);
+  // Dragging the big knob moves it ~1° per pixel, which takes ratio*stepsPerRev/360 encoder steps.
+  attachKnobInput($('tuningKnob'), () => ratio() * stepsPerRev() / 360);
+
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'ArrowRight') { stepEncoder(1); e.preventDefault(); }
+    else if (e.key === 'ArrowLeft') { stepEncoder(-1); e.preventDefault(); }
+    else if (e.key === ' ') { toggleBand(); e.preventDefault(); }
+  });
+  $('stepsPerRev').addEventListener('input', render);
+  $('ratio').addEventListener('input', render);
+
+  // ---------- Init ----------
+  buildDial();
+  buildMeter();
+  tuningRotor = buildKnob($('tuningKnob'), 88, 48, ['#5a5a5a', '#151515']);
+  encoderRotor = buildKnob($('encoderKnob'), 40, 20, ['#b8b8b8', '#4a4a4a']);
+  render();
+  animateMeter();
+})();
+</script>
+</body>
+</html>
