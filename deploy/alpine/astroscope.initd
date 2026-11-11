@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+name="AstroScope"
+description="AstroScope remote capture server"
+
+directory="/opt/astroscope"
+command="/usr/bin/node"
+# Set ASTROSCOPE_INSPECT=1 in /etc/conf.d/astroscope to open the Node inspector
+# on 127.0.0.1:9229 (reach it over SSH / VS Code Remote-SSH).
+command_args="--enable-source-maps ${ASTROSCOPE_INSPECT:+--inspect=127.0.0.1:9229} dist/server/index.js"
+command_user="astroscope:plugdev"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/astroscope.out"
+error_log="/var/log/astroscope.err"
+
+# Set ASTROSCOPE_MOCK=1 (e.g. in /etc/conf.d/astroscope) to force the simulated camera.
+export PORT="${PORT:-3000}"
+export NODE_ENV=production
+export ASTROSCOPE_ASI_SDK_PATH="${ASTROSCOPE_ASI_SDK_PATH:-/opt/astroscope/bin}"
+
+depend() {
+  need localmount
+  after net udev
+}
+
+# The service user cannot create files in /var/log itself.
+start_pre() {
+  checkpath -f -m 0640 -o astroscope:plugdev "$output_log" "$error_log"
+}

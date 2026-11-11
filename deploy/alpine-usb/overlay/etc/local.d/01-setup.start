@@ -1,0 +1,414 @@
+#!/bin/sh
+# AstroScope provisioning hook, run by OpenRC's "local" service.
+#
+# One script, two modes, chosen by what the root filesystem is:
+#
+#  * root is tmpfs  -> we booted the USB stick (Alpine diskless live system).
+#    Install Alpine to the internal disk with setup-alpine, then power off so
+#    the USB can be removed.
+#  * root is a disk -> we booted the installed system. On the first boot
+#    (until /var/lib/astroscope-provisioned exists) fetch, build and start
+#    AstroScope. Afterwards this is a no-op; OpenRC starts the service.
+#
+# The installer copies this file to the SSD together with the rest of /etc
+# (setup-disk packages the live /etc via "lbu package").
+
+CONF=/etc/astroscope-provision.conf
+LOG=/var/log/astroscope-provision.log
+
+# Detach so a slow step never delays the rest of boot.
+if [ -z "$ASTRO_BG" ]; then
+  ASTRO_BG=1 nohup "$0" </dev/null >/dev/null 2>&1 &
+  exit 0
+fi
+
+# Only one instance: OpenRC restarts "local" (and so this hook) whenever
+# networking restarts.
+LOCK=/run/astroscope-hook.lock
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+REPO=https://github.com/dkdaddy/astroscope.git
+BRANCH=main
+TARGET_DISK=
+POWEROFF=1
+REINSTALL=0
+RESET_KEY=0
+KEYMAP=none
+CONSOLE_PW_HASH=
+WIFI_SSID=
+WIFI_PSK=
+WIFI_COUNTRY=
+[ -f "$CONF" ] && . "$CONF"
+
+APP=/opt/astroscope
+APP_USER=astroscope
+SDK_STAGING=/opt/astroscope-sdk
+DONE_MARKER=/var/lib/astroscope-provisioned
+INSTALLED_MARKER=/etc/astroscope-installed
+PROBE=/run/astro-probe
+
+log() { echo "[$(date '+%F %T')] $*" >&2; }
+git() { command git -c safe.directory='*' "$@"; }
+
+# set_root_pw SHADOW_FILE HASH  (HASH may be "*" to lock the account)
+set_root_pw() {
+  awk -F: -v OFS=: -v h="$2" '$1 == "root" {$2 = h} 1' "$1" > "$1.new" && cat "$1.new" > "$1"
+  rm -f "$1.new"
+}
+
+wired_ifaces() {
+  for n in /sys/class/net/*; do
+    ifc=${n##*/}
+    [ "$ifc" = lo ] && continue
+    [ -d "$n/wireless" ] && continue
+    [ -e "$n/device" ] && echo "$ifc"
+  done
+}
+
+has_route() { ip route | grep -q '^default'; }
+
+wait_net() {
+  i=0
+  while ! has_route && [ $i -lt 45 ]; do sleep 1; i=$((i + 1)); done
+  has_route && return 0
+  # The configured interface did not get a lease; try every wired NIC.
+  for ifc in $(wired_ifaces); do
+    ip link set "$ifc" up
+    udhcpc -i "$ifc" -n -q -t 5 && has_route && return 0
+  done
+  has_route
+}
+
+# ---------------------------------------------------------------- installer
+
+# Whole-disk name (e.g. sdb, nvme0n1) of the device we booted from.
+boot_disk() {
+  for m in /media/*; do
+    [ -f "$m/.alpine-release" ] || continue
+    dev=$(awk -v m="$m" '$2 == m {print $1; exit}' /proc/mounts)
+    [ -n "$dev" ] || continue
+    name=${dev#/dev/}
+    parent=$(basename "$(dirname "$(readlink -f "/sys/class/block/$name")")")
+    if [ "$parent" = block ]; then echo "$name"; else echo "$parent"; fi
+    return
+  done
+}
+
+# Prints the target disk: TARGET_DISK if set, else the only internal disk.
+pick_disk() {
+  if [ -n "$TARGET_DISK" ] && [ "$TARGET_DISK" != auto ]; then
+    echo "$TARGET_DISK"
+    return 0
+  fi
+  bd=$(boot_disk)
+  list=
+  for s in /sys/block/*; do
+    n=${s##*/}
+    case $n in
+      nvme*n[0-9]*|sd[a-z]*|vd[a-z]*|mmcblk[0-9]|mmcblk[0-9][0-9]) ;;
+      *) continue ;;
+    esac
+    [ "$n" = "$bd" ] && continue
+    [ "$(cat "$s/removable" 2>/dev/null)" = 1 ] && continue
+    readlink -f "$s" | grep -q /usb && continue
+    [ "$(cat "$s/size" 2>/dev/null)" -ge 16000000 ] || continue # ~8 GB
+    list="$list /dev/$n"
+  done
+  # shellcheck disable=SC2086
+  set -- $list
+  if [ $# -ne 1 ]; then
+    log "cannot choose a disk automatically (candidates:$list); set --install-to explicitly"
+    return 1
+  fi
+  echo "$1"
+}
+
+# Prints the partition of $1 that holds an Alpine root filesystem.
+find_root_part() {
+  d=${1#/dev/}
+  mkdir -p "$PROBE"
+  for p in /sys/block/"$d"/"$d"*; do
+    [ -d "$p" ] || continue
+    dev=/dev/${p##*/}
+    if mount -o ro "$dev" "$PROBE" 2>/dev/null; then
+      if [ -f "$PROBE/etc/alpine-release" ]; then
+        umount "$PROBE"
+        echo "$dev"
+        return 0
+      fi
+      umount "$PROBE"
+    fi
+  done
+  return 1
+}
+
+already_installed() {
+  root=$(find_root_part "$1") || return 1
+  mount -o ro "$root" "$PROBE" || return 1
+  [ -f "$PROBE$INSTALLED_MARKER" ]
+  rc=$?
+  umount "$PROBE"
+  return $rc
+}
+
+# Access recovery: replace root's authorized_keys on the already-installed
+# system with the key(s) on this USB, without touching anything else.
+reset_key() {
+  log "RESET_KEY mode: replacing root SSH keys on the installed system"
+  disk=$(pick_disk) || return 1
+  root=$(find_root_part "$disk") || { log "ERROR: no installed system found on $disk"; return 1; }
+  mkdir -p /run/target
+  mount "$root" /run/target || return 1
+  install -d -m 700 /run/target/root/.ssh
+  install -m 600 /root/.ssh/authorized_keys /run/target/root/.ssh/authorized_keys
+  [ -z "$CONSOLE_PW_HASH" ] || set_root_pw /run/target/etc/shadow "$CONSOLE_PW_HASH"
+  sync
+  umount /run/target
+  log "keys replaced"
+}
+
+# apk add inside the installed system mounted at $1.
+target_apk_add() {
+  t=$1; shift
+  for d in proc sys dev; do mount -o bind "/$d" "$t/$d"; done
+  cp /etc/resolv.conf "$t/etc/resolv.conf" 2>/dev/null
+  chroot "$t" apk add --no-progress "$@"
+  rc=$?
+  for d in dev sys proc; do umount "$t/$d"; done
+  return $rc
+}
+
+# Writes Wi-Fi configuration into the installed system rooted at $1.
+configure_wifi_target() {
+  t=$1
+  wl=
+  for n in /sys/class/net/*; do
+    [ -d "$n/wireless" ] && { wl=${n##*/}; break; }
+  done
+  # No radio visible from the live system (firmware not loaded yet); the
+  # installed system has the firmware, where it normally appears as wlan0.
+  [ -n "$wl" ] || wl=wlan0
+
+  mkdir -p "$t/etc/wpa_supplicant" "$t/etc/conf.d"
+  conf=$t/etc/wpa_supplicant/wpa_supplicant.conf
+  (
+    umask 077
+    {
+      printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n'
+      [ -n "$WIFI_COUNTRY" ] && printf 'country=%s\n' "$WIFI_COUNTRY"
+      if [ -n "$WIFI_PSK" ]; then
+        wpa_passphrase "$WIFI_SSID" "$WIFI_PSK" | sed '/^[[:space:]]*#psk=/d'
+      else
+        printf 'network={\n\tssid="%s"\n\tkey_mgmt=NONE\n}\n' "$WIFI_SSID"
+      fi
+    } > "$conf.new"
+  )
+  if ! grep -q 'network=' "$conf.new"; then
+    log "ERROR: could not build Wi-Fi config (passphrase must be 8-63 characters); Wi-Fi not configured"
+    rm -f "$conf.new"
+    return 1
+  fi
+  mv "$conf.new" "$conf"
+
+  printf 'wpa_supplicant_args="-i%s"\n' "$wl" >> "$t/etc/conf.d/wpa_supplicant"
+  printf '\nauto %s\niface %s inet dhcp\n' "$wl" "$wl" >> "$t/etc/network/interfaces"
+  mkdir -p "$t/etc/runlevels/boot"
+  ln -sf /etc/init.d/wpa_supplicant "$t/etc/runlevels/boot/wpa_supplicant"
+  log "Wi-Fi configured for SSID '$WIFI_SSID' on $wl"
+}
+
+install_mode() {
+  log "installer mode (booted from USB)"
+  modprobe ext4 2>/dev/null
+  modprobe vfat 2>/dev/null
+
+  if [ "$RESET_KEY" = 1 ]; then
+    reset_key
+    return
+  fi
+
+  wait_net || { log "ERROR: no network"; return 1; }
+
+  # SSH first so a failed install can be inspected remotely.
+  sed -i 's/^root:[!*]*:/root:*:/' /etc/shadow
+  apk update || return 1
+  apk add --no-progress openssh || return 1
+  rc-service sshd start
+
+  disk=$(pick_disk) || return 1
+  [ -b "$disk" ] || { log "ERROR: $disk is not a block device"; return 1; }
+
+  if [ "$REINSTALL" != 1 ] && already_installed "$disk"; then
+    log "$disk already holds an AstroScope install; nothing to do. Remove the USB and reboot."
+    return 0
+  fi
+
+  # Everything in this world file is installed onto the SSD by setup-disk.
+  # nodejs & co. plus what VS Code Remote-SSH needs on Alpine (bash, curl, tar, libstdc++).
+  apk add --no-progress nodejs npm git libusb libstdc++ gcompat avahi dbus avahi-tools chrony \
+    bash curl tar procps htop nano || return 1
+  rc-update add dbus default
+  rc-update add avahi-daemon default
+
+  # Only wpa_passphrase is needed here. Firmware can't be installed on the live
+  # system (/lib/firmware is the read-only modloop); it goes onto the SSD below.
+  if [ -n "$WIFI_SSID" ]; then
+    apk add --no-progress wpa_supplicant || return 1
+  fi
+
+  host=$(cat /etc/hostname)
+  release=$(cut -d. -f1,2 /etc/alpine-release)
+  ifaces=$(printf 'auto lo\niface lo inet loopback\n'
+    for ifc in $(wired_ifaces); do printf '\nauto %s\niface %s inet dhcp\n' "$ifc" "$ifc"; done)
+
+  cat > /tmp/answers <<EOF
+KEYMAPOPTS="$KEYMAP"
+HOSTNAMEOPTS="$host"
+DEVDOPTS=mdev
+INTERFACESOPTS="$ifaces"
+TIMEZONEOPTS="-z UTC"
+PROXYOPTS=none
+APKREPOSOPTS="https://dl-cdn.alpinelinux.org/alpine/v$release/main https://dl-cdn.alpinelinux.org/alpine/v$release/community"
+USEROPTS=none
+SSHDOPTS=openssh
+NTPOPTS=chrony
+DISKOPTS="-m sys -s 0 $disk"
+LBUOPTS=none
+APKCACHEOPTS=none
+EOF
+
+  log "installing Alpine to $disk (this ERASES the disk)"
+  # SSH_CONNECTION stops setup-alpine from restarting networking mid-install
+  # (which would drop the lease and restart this hook).
+  ERASE_DISKS="$disk" SSH_CONNECTION=astroscope-installer setup-alpine -e -f /tmp/answers \
+    || { log "ERROR: setup-alpine failed"; return 1; }
+
+  # setup-alpine leaves nothing mounted; finish the new system's root.
+  root=$(find_root_part "$disk") || { log "ERROR: installed root not found on $disk"; return 1; }
+  mkdir -p /run/target
+  mount "$root" /run/target || return 1
+
+  # Console (keyboard/monitor) login uses the password hash from make-usb.sh;
+  # SSH stays key-only.
+  set_root_pw /run/target/etc/shadow "${CONSOLE_PW_HASH:-*}"
+  [ -n "$CONSOLE_PW_HASH" ] || log "no console password set; console login is disabled"
+  sed -i 's#^\(root:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\).*#\1/bin/bash#' /run/target/etc/passwd
+
+  # sshd_config Includes sshd_config.d/ before its own settings and the first
+  # value wins, so a drop-in overrides Alpine's "AllowTcpForwarding no".
+  # Forwarding is needed for VS Code Remote-SSH and the Node inspector tunnel.
+  mkdir -p /run/target/etc/ssh/sshd_config.d
+  cat > /run/target/etc/ssh/sshd_config.d/10-astroscope.conf <<'EOF'
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AllowTcpForwarding yes
+EOF
+
+  # lbu does not carry unmodified-looking init scripts; copy ours explicitly.
+  install -m 755 /etc/init.d/astroscope /run/target/etc/init.d/astroscope
+  ln -sf /etc/init.d/chronyd /run/target/etc/runlevels/default/chronyd
+
+  if [ -n "$WIFI_SSID" ]; then
+    target_apk_add /run/target wpa_supplicant wpa_supplicant-openrc iw wireless-regdb \
+      linux-firmware-intel linux-firmware-mediatek linux-firmware-rtlwifi linux-firmware-rtw88 \
+      linux-firmware-rtw89 linux-firmware-ath10k linux-firmware-ath11k linux-firmware-brcm \
+      || log "WARNING: Wi-Fi packages failed to install; Ethernet still works"
+    configure_wifi_target /run/target
+  fi
+
+  sdk=$(ls /media/*/libASICamera2.so 2>/dev/null | head -n1)
+  if [ -n "$sdk" ]; then
+    mkdir -p /run/target"$SDK_STAGING"
+    install -m 755 "$sdk" /run/target"$SDK_STAGING"/libASICamera2.so
+  else
+    log "no libASICamera2.so on the USB; the simulator will be used"
+  fi
+
+  touch /run/target"$INSTALLED_MARKER"
+  # Do not leave secrets in the installed copy of the config.
+  sed -i '/^WIFI_PSK=/d;/^CONSOLE_PW_HASH=/d' /run/target/etc/astroscope-provision.conf
+  log "install complete"
+  cp "$LOG" /run/target/var/log/astroscope-install.log
+  sync
+  umount /run/target
+}
+
+# ------------------------------------------------------------- first boot
+
+firstboot_mode() {
+  [ -f "$DONE_MARKER" ] && return 0
+  log "first boot from installed system"
+
+  wait_net || { log "no network; will retry on next boot"; return 1; }
+  apk update
+
+  addgroup -S plugdev 2>/dev/null
+  adduser -S -D -H -h "$APP" -G users "$APP_USER" 2>/dev/null
+  addgroup "$APP_USER" plugdev 2>/dev/null
+
+  # mdev gives USB device nodes root-only access by default; open them up so
+  # the unprivileged service can use the ZWO camera (same as ZWO's udev rule).
+  if ! grep -q 'DEVTYPE=usb_device' /etc/mdev.conf; then
+    printf '\n# ZWO / libusb access\nSUBSYSTEM=usb;DEVTYPE=usb_device;.*\troot:plugdev 0666\n' >> /etc/mdev.conf
+  fi
+  mdev -s
+
+  if [ -d "$APP/.git" ]; then
+    git -C "$APP" fetch --depth 1 origin "$BRANCH" && git -C "$APP" reset --hard FETCH_HEAD
+  else
+    git clone --depth 1 -b "$BRANCH" "$REPO" "$APP" || { log "ERROR: clone failed"; return 1; }
+  fi
+
+  cd "$APP" || return 1
+  npm ci && npm run build && npm prune --omit=dev || { log "ERROR: build failed"; return 1; }
+
+  mkdir -p bin logs recordings
+  [ -f "$SDK_STAGING/libASICamera2.so" ] && install -m 755 "$SDK_STAGING/libASICamera2.so" bin/libASICamera2.so
+  chown "$APP_USER":users "$APP" bin logs recordings
+
+  rc-update add astroscope default
+  rc-service astroscope restart
+
+  touch "$DONE_MARKER"
+  log "first-boot provisioning complete"
+}
+
+# -------------------------------------------------------------------- main
+
+# Copy the log to the USB stick so it can be read on another PC. $1 = OK|FAILED
+report_to_usb() {
+  for m in /media/*; do
+    [ -f "$m/.alpine-release" ] || continue
+    mount -o remount,rw "$m" || return
+    rm -f "$m"/ASTROSCOPE-INSTALL-*.txt
+    cp "$LOG" "$m/ASTROSCOPE-INSTALL-$1.txt"
+    sync
+    mount -o remount,ro "$m"
+    return
+  done
+}
+
+mkdir -p /var/lib
+exec >>"$LOG" 2>&1
+log "=== astroscope hook start ==="
+
+root_fs=$(awk '$2 == "/" {t = $3} END {print t}' /proc/mounts)
+if [ "$root_fs" = tmpfs ] || [ "$root_fs" = rootfs ]; then
+  if install_mode; then
+    log "SUCCESS"
+    report_to_usb OK
+    if [ "$POWEROFF" = 1 ]; then
+      log "powering off; remove the USB, then power on to boot from the internal disk"
+      sleep 5
+      poweroff
+    fi
+  else
+    log "FAILED; staying up so you can ssh in (or read the log on the USB stick)"
+    report_to_usb FAILED
+  fi
+else
+  firstboot_mode
+fi
+log "=== astroscope hook end ==="

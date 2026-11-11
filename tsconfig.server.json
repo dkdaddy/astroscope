@@ -5,6 +5,7 @@
     "moduleResolution": "NodeNext",
     "outDir": "./dist",
     "rootDir": "./src",
+    "sourceMap": true,
     "noEmit": false
   },
   "include": ["src/common/**/*", "src/server/**/*"]

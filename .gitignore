@@ -4,3 +4,6 @@ recordings/
 logs/
 *.ser
 .DS_Store
+deploy/alpine-usb/out/
+deploy/alpine-usb/cache/
+*.img
