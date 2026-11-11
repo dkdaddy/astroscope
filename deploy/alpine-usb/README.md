@@ -6,7 +6,7 @@ Builds a UEFI-bootable USB that **installs Alpine Linux plus AstroScope onto a m
 Build an image file, then flash it with Rufus (choose "DD Image" mode if asked) or balenaEtcher. Run this single line in **PowerShell**:
 
 ```powershell
-wsl -d Ubuntu -u root -- bash /mnt/c/Users/bobco/code/astroscope/deploy/alpine-usb/make-usb.sh --ssh-key /mnt/c/Users/bobco/.ssh/id_ed25519.pub --install-to auto --sdk /mnt/c/Users/bobco/zwo-sdk/libASICamera2.so --wifi-ssid "Office" --wifi-country GB --image /mnt/c/Users/bobco/astroscope-usb.img
+wsl -d Ubuntu -u root -- bash /mnt/c/Users/bobco/code/astroscope/deploy/alpine-usb/make-usb.sh --ssh-key /mnt/c/Users/bobco/.ssh/id_ed25519.pub --install-to auto --sdk /mnt/c/Users/bobco/zwo-sdk/libASICamera2.so --wifi-ssid "Office" --wifi-country GB --disable-sd-reader --image /mnt/c/Users/bobco/astroscope-usb.img
 ```
 
 - It asks for the console password, then the Wi-Fi passphrase. The image is written to `C:\Users\bobco\astroscope-usb.img`.
@@ -16,7 +16,15 @@ wsl -d Ubuntu -u root -- bash /mnt/c/Users/bobco/code/astroscope/deploy/alpine-u
 - `--sdk` is the Linux x64 `libASICamera2.so` from ZWO's developer SDK (`lib/x64/libASICamera2.so.1.42`, renamed). Omit it to run the simulator.
 - From a Linux host you can write straight to the stick instead: `sudo ./make-usb.sh ... /dev/sdX`.
 
-Needs `curl sfdisk wipefs mkfs.vfat lsblk losetup openssl` (Ubuntu: `apt install fdisk dosfstools openssl curl`).
+**Writing the image to the stick without extra tools:** WSL can't see USB sticks (`wsl --mount` doesn't support them), so use the built-in PowerShell script. Open PowerShell **as Administrator**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\bobco\code\astroscope\deploy\alpine-usb\write-usb.ps1
+```
+
+It lists only USB disks, asks for the disk number twice, erases that stick, writes `C:\Users\bobco\astroscope-usb.img` and reads it back to verify. Use `-Image <path>` for a different image.
+
+Needs `curl sfdisk wipefs mkfs.vfat lsblk losetup cpio gzip openssl` (Ubuntu: `apt install fdisk dosfstools openssl curl cpio`).
 
 | Option | Meaning |
 |---|---|
@@ -30,7 +38,11 @@ Needs `curl sfdisk wipefs mkfs.vfat lsblk losetup openssl` (Ubuntu: `apt install
 | `--keymap "gb gb"` | Console keyboard layout and variant (default `none` = US). |
 | `--wifi-ssid`, `--wifi-psk`, `--wifi-country GB` | Configure Wi-Fi on the installed system (passphrase prompted if omitted; empty = open network). |
 | `--image FILE` | Write a disk image instead of a device (works in WSL; flash with Rufus/balenaEtcher). |
+| `--debug-boot` | Troubleshooting: show kernel messages and trace Alpine's early boot (`debug_init`), including how it searches for the stick. |
+| `--disable-sd-reader` | Stop the SD card reader driver loading (`module_blacklist=sdhci,sdhci_pci,sdhci_acpi`, enforced by the kernel) on the stick and on the installed system. For mini PCs whose empty reader keeps logging `mmc0: Timeout waiting for hardware cmd interrupt` / `SDHCI REGISTER DUMP`. Alternative: disable the SD/eMMC controller in the BIOS. Don't use it if the PC's only internal storage is eMMC. |
 | `--overlay-only` | Only write `out/local.apkovl.tar.gz`. |
+
+**"Mounting boot media failed" on real hardware:** Alpine's early boot gives up looking for the stick after about 6 seconds without new device events (its `usbdelay` option doesn't extend this), and slow USB sticks appear later. The stick therefore carries a small second initramfs (`boot/astroscope-initrd.gz`, loaded after Alpine's) that wraps the search and retries it for up to about 3 minutes, printing `AstroScope: boot media not found yet, retrying (n/25)...`. Set `FINDFS_TRIES` to change the number of attempts.
 
 ## What happens
 1. **USB boot (live, RAM):** the hook [01-setup.start](./overlay/etc/local.d/01-setup.start) gets a DHCP lease, starts sshd (so a failed install can be inspected), picks the target disk, and runs `setup-alpine` with an answer file (`-m sys`, ext4, GRUB EFI, openssh, chrony, avahi, Node/git/libusb/gcompat). It then sets the console password (or locks it), disables SSH password auth, configures Wi-Fi if requested, stages the SDK, writes a marker, writes a report to the USB stick and powers off. About 1-2 minutes on a fast connection.

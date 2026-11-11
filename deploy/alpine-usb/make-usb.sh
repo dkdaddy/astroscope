@@ -26,7 +26,13 @@ OUT_DIR="${OUT_DIR:-$HERE/out}"
 
 SSH_KEY="" SDK="" ISO="" OVERLAY_ONLY=0 ASSUME_YES=0 FORCE=0 DEV="" IMAGE=""
 IMAGE_MIB="${IMAGE_MIB:-1024}"
-INSTALL_TO="" POWEROFF=1 REINSTALL=0 RESET_KEY=0
+# How many times the boot-media search is retried (each try ~6-8 s).
+FINDFS_TRIES="${FINDFS_TRIES:-25}"
+INSTALL_TO="" POWEROFF=1 REINSTALL=0 RESET_KEY=0 DEBUG_BOOT=0 DISABLE_SD=0
+# SD card reader drivers. On some mini PCs the empty reader retries forever
+# ("mmc0: Timeout waiting for hardware cmd interrupt") and early boot never
+# finds the USB stick. module_blacklist= is enforced by the kernel itself.
+SD_MODULES="sdhci,sdhci_pci,sdhci_acpi"
 KEYMAP=none CONSOLE_LOGIN=1 CONSOLE_HASH=""
 WIFI_SSID="" WIFI_PSK="" WIFI_COUNTRY="" WIFI_PSK_SET=0
 
@@ -53,6 +59,8 @@ while [ $# -gt 0 ]; do
     --no-poweroff) POWEROFF=0; shift ;;
     --reinstall) REINSTALL=1; shift ;;
     --reset-key) RESET_KEY=1; shift ;;
+    --debug-boot) DEBUG_BOOT=1; shift ;;
+    --disable-sd-reader) DISABLE_SD=1; shift ;;
     --image) IMAGE="$2"; shift 2 ;;
     --overlay-only) OVERLAY_ONLY=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
@@ -96,6 +104,7 @@ build_overlay() {
       "$(sq "$REPO")" "$(sq "$BRANCH")" "$(sq "$INSTALL_TO")" "$POWEROFF" "$REINSTALL" "$RESET_KEY"
     printf 'KEYMAP=%s\nCONSOLE_PW_HASH=%s\n' "$(sq "$KEYMAP")" "$(sq "$CONSOLE_HASH")"
     printf 'WIFI_SSID=%s\nWIFI_PSK=%s\nWIFI_COUNTRY=%s\n' "$(sq "$WIFI_SSID")" "$(sq "$WIFI_PSK")" "$(sq "$WIFI_COUNTRY")"
+    [ "$DISABLE_SD" -eq 0 ] || printf 'EXTRA_KERNELOPTS=%s\n' "$(sq "module_blacklist=$SD_MODULES")"
   } > "$stage/etc/astroscope-provision.conf"
   chmod 600 "$stage/etc/astroscope-provision.conf"
 
@@ -149,6 +158,35 @@ fetch_iso() {
   echo "$CACHE_DIR/$name"
 }
 
+# build_retry_initrd ALPINE_INITRAMFS OUT.gz
+# Extra initramfs layered on top of Alpine's: the real nlplug-findfs is kept as
+# nlplug-findfs.real and replaced by a wrapper that retries the search.
+build_retry_initrd() {
+  local src="$1" out="$2" d
+  d="$(mktemp -d)"
+  mkdir -p "$d/usr/sbin"
+  (cd "$d" && gzip -dc "$src" | cpio -id --quiet usr/sbin/nlplug-findfs) \
+    || die "could not extract nlplug-findfs from $src"
+  [ -x "$d/usr/sbin/nlplug-findfs" ] || die "nlplug-findfs not found in $src"
+  mv "$d/usr/sbin/nlplug-findfs" "$d/usr/sbin/nlplug-findfs.real"
+  cat > "$d/usr/sbin/nlplug-findfs" <<EOF
+#!/usr/bin/sh
+# AstroScope: retry Alpine's boot-media search; slow USB sticks appear late.
+tries=$FINDFS_TRIES
+i=1
+while :; do
+	/usr/sbin/nlplug-findfs.real "\$@" && exit 0
+	[ "\$i" -ge "\$tries" ] && exit 1
+	echo "AstroScope: boot media not found yet, retrying (\$i/\$tries)..." >&2
+	sleep 2
+	i=\$((i + 1))
+done
+EOF
+  chmod 755 "$d/usr/sbin/nlplug-findfs"
+  (cd "$d" && find usr | cpio -o -H newc -R 0:0 --quiet | gzip -9) > "$out"
+  rm -rf "$d"
+}
+
 build_overlay
 if [ "$OVERLAY_ONLY" -eq 1 ]; then
   echo "Copy $OUT_DIR/local.apkovl.tar.gz to the root of the Alpine boot partition." >&2
@@ -158,7 +196,7 @@ fi
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ -n "$DEV" ] || [ -n "$IMAGE" ] || die "target required: a USB device (/dev/sdX) or --image FILE"
 [ -z "$DEV" ] || [ -z "$IMAGE" ] || die "give either a device or --image, not both"
-for tool in curl sfdisk wipefs mkfs.vfat mount sha256sum lsblk losetup; do
+for tool in curl sfdisk wipefs mkfs.vfat mount sha256sum lsblk losetup cpio gzip; do
   command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
 
@@ -228,6 +266,25 @@ mount "$(part 1)" "$WORK/boot"
 
 echo "Copying Alpine to the USB"
 cp -r --no-preserve=all "$WORK/iso/." "$WORK/boot/"
+
+# Alpine's nlplug-findfs gives up looking for the boot media after ~6 s without
+# new device events (its -t/usbdelay option does not extend that). Slow real USB
+# sticks show up later -> "Mounting boot media failed". Add a second initramfs
+# that replaces it with a wrapper which retries the search.
+build_retry_initrd "$WORK/iso/boot/initramfs-lts" "$WORK/boot/boot/astroscope-initrd.gz"
+sed -i 's#^\(initrd[[:space:]]*/boot/initramfs-lts\)[[:space:]]*$#\1 /boot/astroscope-initrd.gz#' "$WORK/boot/boot/grub/grub.cfg"
+sed -i 's#^\(INITRD /boot/initramfs-lts\)[[:space:]]*$#\1,/boot/astroscope-initrd.gz#' "$WORK/boot/boot/syslinux/syslinux.cfg"
+grep -q 'astroscope-initrd.gz' "$WORK/boot/boot/grub/grub.cfg" || die "could not add the retry initrd to grub.cfg"
+
+KOPTS=""
+[ "$DISABLE_SD" -eq 0 ] || KOPTS=" module_blacklist=$SD_MODULES"
+# --debug-boot: trace the initramfs (set -x, nlplug-findfs -d) and show kernel messages.
+[ "$DEBUG_BOOT" -eq 0 ] || KOPTS="$KOPTS debug_init"
+for cfg in "$WORK/boot/boot/grub/grub.cfg" "$WORK/boot/boot/syslinux/syslinux.cfg"; do
+  [ -f "$cfg" ] || continue
+  sed -i "s/modules=loop,squashfs,sd-mod,usb-storage/&$KOPTS/" "$cfg"
+  [ "$DEBUG_BOOT" -eq 0 ] || sed -i "s/ quiet//" "$cfg"
+done
 cp "$OUT_DIR/local.apkovl.tar.gz" "$WORK/boot/local.apkovl.tar.gz"
 [ -z "$SDK" ] || install -m 755 "$SDK" "$WORK/boot/libASICamera2.so"
 

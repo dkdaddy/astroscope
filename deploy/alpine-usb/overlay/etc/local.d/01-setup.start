@@ -39,6 +39,7 @@ CONSOLE_PW_HASH=
 WIFI_SSID=
 WIFI_PSK=
 WIFI_COUNTRY=
+EXTRA_KERNELOPTS=
 [ -f "$CONF" ] && . "$CONF"
 
 APP=/opt/astroscope
@@ -82,9 +83,22 @@ wait_net() {
 
 # ---------------------------------------------------------------- installer
 
+# Prints the mount point of the installer stick. Alpine normally mounts it at
+# /media/usb; if it is not mounted (or was lost), mount it again by its label.
+boot_media() {
+  for m in /media/*; do
+    [ -f "$m/.alpine-release" ] && { echo "$m"; return 0; }
+  done
+  dev=$(findfs LABEL=ALPINE 2>/dev/null) || return 1
+  mkdir -p /run/astro-media
+  mountpoint -q /run/astro-media || mount -t vfat -o ro "$dev" /run/astro-media || return 1
+  [ -f /run/astro-media/.alpine-release ] || return 1
+  echo /run/astro-media
+}
+
 # Whole-disk name (e.g. sdb, nvme0n1) of the device we booted from.
 boot_disk() {
-  for m in /media/*; do
+  for m in /media/* /run/astro-media; do
     [ -f "$m/.alpine-release" ] || continue
     dev=$(awk -v m="$m" '$2 == m {print $1; exit}' /proc/mounts)
     [ -n "$dev" ] || continue
@@ -228,10 +242,18 @@ install_mode() {
     return
   fi
 
+  # Copy the ZWO SDK off the stick now, before the long install: some cheap
+  # sticks drop off the bus under load and are unreadable later.
+  media=$(boot_media)
+  log "installer stick mounted at: ${media:-NOT FOUND}"
+  rm -f /tmp/libASICamera2.so
+  [ -n "$media" ] && [ -f "$media/libASICamera2.so" ] && cp "$media/libASICamera2.so" /tmp/libASICamera2.so
+
   wait_net || { log "ERROR: no network"; return 1; }
 
-  # SSH first so a failed install can be inspected remotely.
-  sed -i 's/^root:[!*]*:/root:*:/' /etc/shadow
+  # SSH first so a failed install can be inspected remotely. The console
+  # password (if any) also works here, so a failure can be debugged locally.
+  set_root_pw /etc/shadow "${CONSOLE_PW_HASH:-*}"
   apk update || return 1
   apk add --no-progress openssh || return 1
   rc-service sshd start
@@ -280,8 +302,10 @@ EOF
 
   log "installing Alpine to $disk (this ERASES the disk)"
   # SSH_CONNECTION stops setup-alpine from restarting networking mid-install
-  # (which would drop the lease and restart this hook).
-  ERASE_DISKS="$disk" SSH_CONNECTION=astroscope-installer setup-alpine -e -f /tmp/answers \
+  # (which would drop the lease and restart this hook). KERNELOPTS is used for
+  # the installed system's boot entry (setup-disk's default is "quiet").
+  ERASE_DISKS="$disk" KERNELOPTS="quiet${EXTRA_KERNELOPTS:+ $EXTRA_KERNELOPTS}" \
+    SSH_CONNECTION=astroscope-installer setup-alpine -e -f /tmp/answers \
     || { log "ERROR: setup-alpine failed"; return 1; }
 
   # setup-alpine leaves nothing mounted; finish the new system's root.
@@ -318,12 +342,13 @@ EOF
     configure_wifi_target /run/target
   fi
 
-  sdk=$(ls /media/*/libASICamera2.so 2>/dev/null | head -n1)
-  if [ -n "$sdk" ]; then
+  if [ -f /tmp/libASICamera2.so ]; then
     mkdir -p /run/target"$SDK_STAGING"
-    install -m 755 "$sdk" /run/target"$SDK_STAGING"/libASICamera2.so
+    install -m 755 /tmp/libASICamera2.so /run/target"$SDK_STAGING"/libASICamera2.so
+    log "ZWO SDK staged for the installed system"
   else
     log "no libASICamera2.so on the USB; the simulator will be used"
+    log "mounts: $(grep -E ' /media| /run/astro' /proc/mounts | tr '\n' ';')"
   fi
 
   touch /run/target"$INSTALLED_MARKER"
@@ -379,15 +404,12 @@ firstboot_mode() {
 
 # Copy the log to the USB stick so it can be read on another PC. $1 = OK|FAILED
 report_to_usb() {
-  for m in /media/*; do
-    [ -f "$m/.alpine-release" ] || continue
-    mount -o remount,rw "$m" || return
-    rm -f "$m"/ASTROSCOPE-INSTALL-*.txt
-    cp "$LOG" "$m/ASTROSCOPE-INSTALL-$1.txt"
-    sync
-    mount -o remount,ro "$m"
-    return
-  done
+  m=$(boot_media) || { log "could not find the USB stick to write the report"; return; }
+  mount -o remount,rw "$m" || return
+  rm -f "$m"/ASTROSCOPE-INSTALL-*.txt
+  cp "$LOG" "$m/ASTROSCOPE-INSTALL-$1.txt"
+  sync
+  mount -o remount,ro "$m"
 }
 
 mkdir -p /var/lib
